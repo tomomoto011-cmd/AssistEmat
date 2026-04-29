@@ -33,23 +33,40 @@ async def connect_db():
         print("❌ Ошибка подключения к БД:", e)
 
 
+# 📚 Получение последних сообщений
+async def get_last_messages(user_id: int, limit: int = 5):
+    global db
+    async with db.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT text FROM messages
+            WHERE user_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            user_id,
+            limit
+        )
+    return [r["text"] for r in rows]
+
+
 # 👋 Старт
 @dp.message(CommandStart())
 async def start(message: Message):
     await message.answer("Привет. Я AssistEmpat 🤝")
 
 
-# 💬 Обработка сообщений
+# 💬 Обработка сообщений с памятью
 @dp.message()
 async def handler(message: Message):
     global db
 
     if db is None:
         await message.answer("❌ БД не подключена")
-        print("❌ db = None")
         return
 
     try:
+        # сохраняем сообщение
         async with db.acquire() as conn:
             await conn.execute(
                 """
@@ -59,12 +76,23 @@ async def handler(message: Message):
                 message.from_user.id,
                 message.text
             )
+
         print("✅ Сохранено в БД")
 
-    except Exception as e:
-        print("❌ Ошибка БД:", e)
+        # получаем историю
+        history = await get_last_messages(message.from_user.id)
 
-    await message.answer("Я получил сообщение 👍")
+        print("📚 История:", history)
+
+        # ответ с памятью
+        await message.answer(
+            "Я запомнил твои последние сообщения:\n\n" +
+            "\n".join(history)
+        )
+
+    except Exception as e:
+        print("❌ Ошибка:", e)
+        await message.answer("Ошибка при работе с БД")
 
 
 # 🚀 Запуск
