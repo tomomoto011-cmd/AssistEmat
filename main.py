@@ -22,12 +22,15 @@ db = None
 # 🔌 Подключение к БД
 async def connect_db():
     global db
-    ssl_context = ssl.create_default_context()
-    db = await asyncpg.create_pool(
-        DATABASE_URL,
-        ssl=ssl_context
-    )
-    print("✅ Подключено к БД")
+    try:
+        ssl_context = ssl.create_default_context()
+        db = await asyncpg.create_pool(
+            DATABASE_URL,
+            ssl=ssl_context
+        )
+        print("✅ Подключено к БД")
+    except Exception as e:
+        print("❌ Ошибка подключения к БД:", e)
 
 
 # 👋 Старт
@@ -39,6 +42,13 @@ async def start(message: Message):
 # 💬 Обработка сообщений
 @dp.message()
 async def handler(message: Message):
+    global db
+
+    if db is None:
+        await message.answer("❌ БД не подключена")
+        print("❌ db = None")
+        return
+
     try:
         async with db.acquire() as conn:
             await conn.execute(
