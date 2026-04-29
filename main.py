@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-QWEN_API_KEY = os.getenv("QWEN_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -22,7 +22,7 @@ dp = Dispatcher()
 db = None
 
 
-# 🔌 Подключение к БД
+# 🔌 БД
 async def connect_db():
     global db
     try:
@@ -36,9 +36,8 @@ async def connect_db():
         print("❌ Ошибка подключения к БД:", e)
 
 
-# 📚 Получение последних сообщений
+# 📚 история
 async def get_last_messages(user_id: int, limit: int = 5):
-    global db
     async with db.acquire() as conn:
         rows = await conn.fetch(
             """
@@ -53,60 +52,55 @@ async def get_last_messages(user_id: int, limit: int = 5):
     return [r["text"] for r in rows]
 
 
-# 🤖 Запрос к Qwen
-async def ask_qwen(history: list[str]) -> str:
+# 🤖 OpenAI
+async def ask_ai(history: list[str]) -> str:
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
+                "https://api.openai.com/v1/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {QWEN_API_KEY}",
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": "qwen-turbo",
-                    "input": {
-                        "messages": [
-                            {
-                                "role": "system",
-                                "content": "Ты заботливый, эмпатичный помощник. Отвечай тепло, просто и по делу."
-                            },
-                            {
-                                "role": "user",
-                                "content": "\n".join(history)
-                            }
-                        ]
-                    }
+                    "model": "gpt-4.1-mini",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "Ты тёплый, эмпатичный помощник. Поддерживай человека, говори просто."
+                        },
+                        {
+                            "role": "user",
+                            "content": "\n".join(history)
+                        }
+                    ]
                 }
             ) as resp:
                 data = await resp.json()
 
-                print("🧠 Qwen raw:", data)
+                print("🧠 AI raw:", data)
 
-                return data["output"]["text"]
+                return data["choices"][0]["message"]["content"]
 
     except Exception as e:
-        print("❌ Ошибка Qwen:", e)
-        return "Мне сейчас сложно ответить, но я рядом."
+        print("❌ Ошибка AI:", e)
+        return "Я рядом. Попробуй сказать ещё раз."
 
 
-# 👋 Старт
+# 👋 старт
 @dp.message(CommandStart())
 async def start(message: Message):
     await message.answer("Привет. Я AssistEmpat 🤝")
 
 
-# 💬 Основной обработчик
+# 💬 обработка
 @dp.message()
 async def handler(message: Message):
-    global db
-
     if db is None:
         await message.answer("❌ БД не подключена")
         return
 
     try:
-        # сохраняем сообщение
         async with db.acquire() as conn:
             await conn.execute(
                 """
@@ -117,25 +111,18 @@ async def handler(message: Message):
                 message.text
             )
 
-        print("✅ Сохранено в БД")
-
-        # получаем историю
         history = await get_last_messages(message.from_user.id)
 
-        print("📚 История:", history)
+        ai_response = await ask_ai(history)
 
-        # получаем ответ от AI
-        ai_response = await ask_qwen(history)
-
-        # отправляем ответ
         await message.answer(ai_response)
 
     except Exception as e:
         print("❌ Ошибка:", e)
-        await message.answer("Ошибка при работе с системой")
+        await message.answer("Ошибка системы")
 
 
-# 🚀 Запуск
+# 🚀 запуск
 async def main():
     await connect_db()
     await dp.start_polling(bot)
