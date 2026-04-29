@@ -16,6 +16,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+# ✅ ТВОЙ ID
+ADMIN_ID = 8590402564
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -52,7 +55,7 @@ async def get_last_messages(user_id: int, limit: int = 5):
     return [r["text"] for r in rows]
 
 
-# 🤖 Запрос к OpenAI
+# 🤖 Запрос к AI
 async def ask_ai(history: list[str]) -> str:
     if not OPENAI_API_KEY:
         return "⚠️ AI не настроен"
@@ -68,14 +71,8 @@ async def ask_ai(history: list[str]) -> str:
                 json={
                     "model": "gpt-4.1-mini",
                     "messages": [
-                        {
-                            "role": "system",
-                            "content": "Ты тёплый, эмпатичный помощник. Поддерживай человека."
-                        },
-                        {
-                            "role": "user",
-                            "content": "\n".join(history)
-                        }
+                        {"role": "system", "content": "Ты тёплый эмпатичный помощник"},
+                        {"role": "user", "content": "\n".join(history)}
                     ]
                 }
             ) as resp:
@@ -84,30 +81,25 @@ async def ask_ai(history: list[str]) -> str:
                 print("🧠 AI raw:", data)
 
                 if "choices" not in data:
-                    return "⚠️ Ошибка AI (проверь ключ)"
+                    return "⚠️ Ошибка AI"
 
                 return data["choices"][0]["message"]["content"]
 
     except Exception as e:
         print("❌ Ошибка AI:", e)
-        return "Я рядом. Попробуй ещё раз."
+        return "Ошибка AI"
 
 
-# 👋 Команда старт
+# 👋 старт
 @dp.message(CommandStart())
 async def start(message: Message):
     await message.answer("Привет. Я AssistEmpat 🤝")
 
 
-# 💬 Основной обработчик
+# 💬 основной обработчик
 @dp.message()
 async def handler(message: Message):
-    if db is None:
-        await message.answer("❌ БД не подключена")
-        return
-
     try:
-        # сохраняем сообщение
         async with db.acquire() as conn:
             await conn.execute(
                 "INSERT INTO messages(user_id, text) VALUES($1, $2)",
@@ -115,27 +107,32 @@ async def handler(message: Message):
                 message.text
             )
 
-        # получаем историю
         history = await get_last_messages(message.from_user.id)
 
-        print("📚 История:", history)
-
-        # ответ AI
         ai_response = await ask_ai(history)
 
         await message.answer(ai_response)
 
     except Exception as e:
         print("❌ Ошибка:", e)
-        await message.answer("Ошибка системы")
+        await message.answer("Ошибка")
 
 
 # 🚀 запуск
 async def main():
     await connect_db()
 
-    # 🔥 УБИРАЕТ ВСЕ КОНФЛИКТЫ
+    # чистим webhook
     await bot.delete_webhook(drop_pending_updates=True)
+
+    # 🔥 БАННЕР ПРИ СТАРТЕ
+    try:
+        await bot.send_message(
+            ADMIN_ID,
+            "🟢 AssistEmpat перезапущен и готов к работе"
+        )
+    except Exception as e:
+        print("❌ Не удалось отправить баннер:", e)
 
     await dp.start_polling(bot)
 
