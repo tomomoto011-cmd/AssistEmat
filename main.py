@@ -1,141 +1,47 @@
-import asyncio
-import logging
 import os
-import ssl
+import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiohttp import web
 
-import asyncpg
-import aiohttp
-
-from aiogram import Bot, Dispatcher
-from aiogram.filters import CommandStart
-from aiogram.types import Message
-
-logging.basicConfig(level=logging.INFO)
-
+# --- переменные ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# ✅ ТВОЙ ID
-ADMIN_ID = 8590402564
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не найден!")
 
+# --- инициализация ---
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-db = None
-
-
-# 🔌 Подключение к БД
-async def connect_db():
-    global db
-    try:
-        ssl_context = ssl.create_default_context()
-        db = await asyncpg.create_pool(
-            DATABASE_URL,
-            ssl=ssl_context
-        )
-        print("✅ Подключено к БД")
-    except Exception as e:
-        print("❌ Ошибка подключения к БД:", e)
-
-
-# 📚 Получение истории
-async def get_last_messages(user_id: int, limit: int = 5):
-    async with db.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT text FROM messages
-            WHERE user_id = $1
-            ORDER BY created_at DESC
-            LIMIT $2
-            """,
-            user_id,
-            limit
-        )
-    return [r["text"] for r in rows]
-
-
-# 🤖 Запрос к AI
-async def ask_ai(history: list[str]) -> str:
-    if not OPENAI_API_KEY:
-        return "⚠️ AI не настроен"
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {OPENAI_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "gpt-4.1-mini",
-                    "messages": [
-                        {"role": "system", "content": "Ты тёплый эмпатичный помощник"},
-                        {"role": "user", "content": "\n".join(history)}
-                    ]
-                }
-            ) as resp:
-                data = await resp.json()
-
-                print("🧠 AI raw:", data)
-
-                if "choices" not in data:
-                    return "⚠️ Ошибка AI"
-
-                return data["choices"][0]["message"]["content"]
-
-    except Exception as e:
-        print("❌ Ошибка AI:", e)
-        return "Ошибка AI"
-
-
-# 👋 старт
-@dp.message(CommandStart())
-async def start(message: Message):
-    await message.answer("Привет. Я AssistEmpat 🤝")
-
-
-# 💬 основной обработчик
+# --- хендлеры ---
 @dp.message()
-async def handler(message: Message):
-    try:
-        async with db.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO messages(user_id, text) VALUES($1, $2)",
-                message.from_user.id,
-                message.text
-            )
+async def echo(message: types.Message):
+    await message.answer("Я жив 😄")
 
-        history = await get_last_messages(message.from_user.id)
+# --- healthcheck для Railway ---
+async def health(request):
+    return web.Response(text="OK")
 
-        ai_response = await ask_ai(history)
+async def start_health_server():
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
 
-        await message.answer(ai_response)
-
-    except Exception as e:
-        print("❌ Ошибка:", e)
-        await message.answer("Ошибка")
-
-
-# 🚀 запуск
+# --- запуск ---
 async def main():
-    await connect_db()
-
-    # чистим webhook
-    await bot.delete_webhook(drop_pending_updates=True)
-
-    # 🔥 БАННЕР ПРИ СТАРТЕ
-    try:
-        await bot.send_message(
-            ADMIN_ID,
-            "🟢 AssistEmpat перезапущен и готов к работе"
-        )
-    except Exception as e:
-        print("❌ Не удалось отправить баннер:", e)
-
+    print("🚀 Бот запускается...")
+    
+    # запускаем HTTP (чтобы Railway не убивал контейнер)
+    await start_health_server()
+    
+    print("🌐 Healthcheck сервер запущен")
+    
+    # запускаем Telegram polling
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
