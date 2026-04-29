@@ -15,18 +15,24 @@ bot = Bot(token=os.getenv("BOT_TOKEN"))
 dp = Dispatcher()
 
 
-@dp.message(CommandStart())
-async def start(message: Message):
-    await message.answer(
-        "Привет. Я AssistEmpat 🤝\n"
-        "Я рядом, чтобы помочь."
-    )
-
-
 @dp.message()
 async def handler(message: Message):
-    await message.answer("Я получил сообщение 👍")
+    try:
+        async with db.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO messages(user_id, text)
+                VALUES($1, $2)
+                """,
+                message.from_user.id,
+                message.text
+            )
+        print("✅ Сохранено в БД")
 
+    except Exception as e:
+        print("❌ Ошибка БД:", e)
+
+    await message.answer("Я получил сообщение 👍")
 
 async def main():
     await dp.start_polling(bot)
