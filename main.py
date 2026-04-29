@@ -22,6 +22,7 @@ dp = Dispatcher()
 db = None
 
 
+# 🔌 Подключение к БД
 async def connect_db():
     global db
     try:
@@ -35,6 +36,7 @@ async def connect_db():
         print("❌ Ошибка подключения к БД:", e)
 
 
+# 📚 Получение истории
 async def get_last_messages(user_id: int, limit: int = 5):
     async with db.acquire() as conn:
         rows = await conn.fetch(
@@ -50,6 +52,7 @@ async def get_last_messages(user_id: int, limit: int = 5):
     return [r["text"] for r in rows]
 
 
+# 🤖 Запрос к OpenAI
 async def ask_ai(history: list[str]) -> str:
     if not OPENAI_API_KEY:
         return "⚠️ AI не настроен"
@@ -65,8 +68,14 @@ async def ask_ai(history: list[str]) -> str:
                 json={
                     "model": "gpt-4.1-mini",
                     "messages": [
-                        {"role": "system", "content": "Ты эмпатичный помощник"},
-                        {"role": "user", "content": "\n".join(history)}
+                        {
+                            "role": "system",
+                            "content": "Ты тёплый, эмпатичный помощник. Поддерживай человека."
+                        },
+                        {
+                            "role": "user",
+                            "content": "\n".join(history)
+                        }
                     ]
                 }
             ) as resp:
@@ -75,7 +84,7 @@ async def ask_ai(history: list[str]) -> str:
                 print("🧠 AI raw:", data)
 
                 if "choices" not in data:
-                    return "⚠️ Ошибка AI"
+                    return "⚠️ Ошибка AI (проверь ключ)"
 
                 return data["choices"][0]["message"]["content"]
 
@@ -84,11 +93,13 @@ async def ask_ai(history: list[str]) -> str:
         return "Я рядом. Попробуй ещё раз."
 
 
+# 👋 Команда старт
 @dp.message(CommandStart())
 async def start(message: Message):
     await message.answer("Привет. Я AssistEmpat 🤝")
 
 
+# 💬 Основной обработчик
 @dp.message()
 async def handler(message: Message):
     if db is None:
@@ -96,6 +107,7 @@ async def handler(message: Message):
         return
 
     try:
+        # сохраняем сообщение
         async with db.acquire() as conn:
             await conn.execute(
                 "INSERT INTO messages(user_id, text) VALUES($1, $2)",
@@ -103,8 +115,12 @@ async def handler(message: Message):
                 message.text
             )
 
+        # получаем историю
         history = await get_last_messages(message.from_user.id)
 
+        print("📚 История:", history)
+
+        # ответ AI
         ai_response = await ask_ai(history)
 
         await message.answer(ai_response)
@@ -114,10 +130,11 @@ async def handler(message: Message):
         await message.answer("Ошибка системы")
 
 
+# 🚀 запуск
 async def main():
     await connect_db()
 
-    # 🔥 КРИТИЧЕСКИЙ ФИКС
+    # 🔥 УБИРАЕТ ВСЕ КОНФЛИКТЫ
     await bot.delete_webhook(drop_pending_updates=True)
 
     await dp.start_polling(bot)
