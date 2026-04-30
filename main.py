@@ -1,7 +1,7 @@
 import os
 import asyncio
 import logging
-import requests
+import aiohttp
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -11,6 +11,9 @@ from aiohttp import web
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+KIE_API_KEY = os.getenv("KIE_API_KEY")
+
+ADMIN_ID = 8590402564
 
 logging.basicConfig(level=logging.INFO)
 
@@ -21,24 +24,27 @@ dp = Dispatcher()
 
 async def ask_openrouter(prompt):
     try:
-        url = "https://openrouter.ai/api/v1/chat/completions"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "mistralai/mixtral-8x7b-instruct",
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=20
+            ) as resp:
 
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json"
-        }
+                if resp.status != 200:
+                    text = await resp.text()
+                    print("❌ OpenRouter HTTP:", text)
+                    return None
 
-        data = {
-            "model": "mistralai/mixtral-8x7b-instruct",
-            "messages": [
-                {"role": "user", "content": prompt}
-            ]
-        }
-
-        response = requests.post(url, headers=headers, json=data, timeout=20)
-        result = response.json()
-
-        return result["choices"][0]["message"]["content"]
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"]
 
     except Exception as e:
         print("❌ OpenRouter:", e)
@@ -47,40 +53,75 @@ async def ask_openrouter(prompt):
 
 async def ask_groq(prompt):
     try:
-        url = "https://api.groq.com/openai/v1/chat/completions"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "llama3-70b-8192",
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=20
+            ) as resp:
 
-        headers = {
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        }
+                if resp.status != 200:
+                    text = await resp.text()
+                    print("❌ Groq HTTP:", text)
+                    return None
 
-        data = {
-            "model": "llama3-70b-8192",
-            "messages": [
-                {"role": "user", "content": prompt}
-            ]
-        }
-
-        response = requests.post(url, headers=headers, json=data, timeout=20)
-        result = response.json()
-
-        return result["choices"][0]["message"]["content"]
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"]
 
     except Exception as e:
         print("❌ Groq:", e)
         return None
 
 
+async def ask_kie(prompt):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.kie.ai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {KIE_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "gpt-3.5-turbo",
+                    "messages": [{"role": "user", "content": prompt}]
+                },
+                timeout=20
+            ) as resp:
+
+                if resp.status != 200:
+                    text = await resp.text()
+                    print("❌ KIE HTTP:", text)
+                    return None
+
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"]
+
+    except Exception as e:
+        print("❌ KIE:", e)
+        return None
+
+
 async def get_ai_response(text):
     print("🧠 OPENROUTER")
-
     answer = await ask_openrouter(text)
     if answer:
         return answer
 
-    print("🧠 GROQ fallback")
-
+    print("⚡ GROQ fallback")
     answer = await ask_groq(text)
+    if answer:
+        return answer
+
+    print("🧩 KIE fallback")
+    answer = await ask_kie(text)
     if answer:
         return answer
 
@@ -127,13 +168,18 @@ async def start_health_server():
 
 async def main():
     print("🚀 БОТ ЗАПУЩЕН")
-    print("🧠 Основной AI: OpenRouter")
-    print("⚡ Fallback: Groq")
+    print("🧠 OpenRouter | ⚡ Groq | 🧩 Kie")
 
     await start_health_server()
 
-    # 🔥 фикс Telegram конфликта
+    # фикс конфликта Telegram
     await bot.delete_webhook(drop_pending_updates=True)
+
+    # уведомление админу
+    try:
+        await bot.send_message(ADMIN_ID, "✅ Бот перезапущен")
+    except:
+        print("❌ Не удалось отправить сообщение админу")
 
     await dp.start_polling(bot)
 
