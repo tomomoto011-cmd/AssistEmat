@@ -20,7 +20,6 @@ logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-QWEN_API_KEY = os.getenv("QWEN_API_KEY")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -29,15 +28,15 @@ DB_PATH = "bot.db"
 scheduler = AsyncIOScheduler()
 
 # ======================
-# 🛑 АНТИ-ДУБЛЬ
+# 🛑 АНТИ-ДУБЛЬ (НОРМАЛЬНЫЙ)
 # ======================
+IS_MAIN = True
+
 if os.getenv("RAILWAY_ENVIRONMENT") == "production":
     replica = os.getenv("RAILWAY_REPLICA_ID")
     if replica and replica != "0":
-        logging.warning(f"⛔ Реплика {replica} остановлена")
-        import time
-        while True:
-            time.sleep(1000)
+        IS_MAIN = False
+        logging.warning(f"⛔ Реплика {replica} без polling")
 
 # ======================
 # БАЗА
@@ -105,21 +104,57 @@ def fix_layout(text):
     return text.translate(layout_map)
 
 # ======================
-# ⏰ ПАРСИНГ ВРЕМЕНИ
+# 🧠 НАТУРАЛЬНЫЙ ПАРСЕР ВРЕМЕНИ
 # ======================
 def parse_time(text: str):
     text = text.lower()
+    now = datetime.now()
 
-    if "через час" in text:
-        return datetime.now() + timedelta(hours=1)
+    # через X минут/часов
+    minutes = re.search(r'через (\d+) минут', text)
+    hours = re.search(r'через (\d+) час', text)
 
+    if minutes:
+        return now + timedelta(minutes=int(minutes.group(1)))
+
+    if hours:
+        return now + timedelta(hours=int(hours.group(1)))
+
+    # завтра
     if "завтра" in text:
-        base = datetime.now() + timedelta(days=1)
+        base = now + timedelta(days=1)
+        if "вечер" in text:
+            return base.replace(hour=19, minute=0)
+        if "утро" in text:
+            return base.replace(hour=9, minute=0)
+
         match = re.search(r'(\d{1,2}):(\d{2})', text)
         if match:
             return base.replace(hour=int(match.group(1)), minute=int(match.group(2)))
+
         return base.replace(hour=9, minute=0)
 
+    # дни недели
+    weekdays = {
+        "понедельник": 0, "вторник": 1, "среду": 2,
+        "четверг": 3, "пятницу": 4, "субботу": 5, "воскресенье": 6
+    }
+
+    for day, idx in weekdays.items():
+        if day in text:
+            days_ahead = (idx - now.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+
+            base = now + timedelta(days=days_ahead)
+
+            match = re.search(r'(\d{1,2}):(\d{2})', text)
+            if match:
+                return base.replace(hour=int(match.group(1)), minute=int(match.group(2)))
+
+            return base.replace(hour=10, minute=0)
+
+    # fallback ISO
     try:
         return datetime.fromisoformat(text)
     except:
@@ -166,6 +201,20 @@ async def get_mood(user_id):
         return row[0] if row else "нейтральное"
 
 # ======================
+# 💪 ПОВЕДЕНКА / STREAK
+# ======================
+def habit_feedback(streak):
+    if streak == 1:
+        return "Начало положено 💪"
+    if streak == 3:
+        return "Уже формируется привычка 🔥"
+    if streak == 7:
+        return "Ты стабилен. Это уже система ⚙️"
+    if streak >= 30:
+        return "Ты машина. Это уровень 🧠"
+    return f"Серия: {streak}"
+
+# ======================
 # AI
 # ======================
 async def ask_ai(user_id, text):
@@ -173,7 +222,7 @@ async def ask_ai(user_id, text):
     mood = await get_mood(user_id)
 
     messages = [
-        {"role": "system", "content": f"Настроение пользователя: {mood}. Отвечай на русском."}
+        {"role": "system", "content": f"Настроение: {mood}. Добавляй мотивацию если уместно."}
     ] + context + [{"role": "user", "content": text}]
 
     try:
@@ -207,7 +256,7 @@ async def load_reminders():
 async def reminder_start(message: Message, state: FSMContext):
     await state.set_state(ReminderFSM.text)
     await state.update_data(text=message.text)
-    await message.answer("Когда? (можно: 'через час', 'завтра 18:00')")
+    await message.answer("Когда? (например: завтра вечером, через 2 часа)")
 
 @dp.message(ReminderFSM.text)
 async def reminder_time(message: Message, state: FSMContext):
@@ -232,69 +281,8 @@ async def reminder_time(message: Message, state: FSMContext):
     await state.clear()
 
 # ======================
-# ЗАМЕТКИ (категории + CRUD)
+# ПРИВЫЧКИ
 # ======================
-@dp.message(F.text.lower().contains("запомни"))
-async def add_note(message: Message):
-    parts = message.text.split("#")
-    text = parts[0]
-    category = parts[1] if len(parts) > 1 else "общие"
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO notes(user_id, text, category) VALUES (?, ?, ?)",
-            (message.from_user.id, text, category)
-        )
-        await db.commit()
-
-    await message.answer(f"📌 Сохранил в категорию: {category}")
-
-@dp.callback_query(F.data == "notes")
-async def show_notes(call: CallbackQuery):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT id, text, category FROM notes WHERE user_id=?", (call.from_user.id,))
-        rows = await cur.fetchall()
-
-    for n in rows:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Удалить", callback_data=f"del_note_{n[0]}")]
-        ])
-        await call.message.answer(f"[{n[2]}] {n[1]}", reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("del_note_"))
-async def delete_note(call: CallbackQuery):
-    nid = int(call.data.split("_")[2])
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM notes WHERE id=?", (nid,))
-        await db.commit()
-    await call.message.edit_text("Удалено")
-
-# ======================
-# ПРИВЫЧКИ (streak)
-# ======================
-@dp.message(F.text.lower().contains("привычка"))
-async def add_habit(message: Message):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO habits(user_id, name) VALUES (?, ?)",
-            (message.from_user.id, message.text)
-        )
-        await db.commit()
-
-    await message.answer("💪 Привычка добавлена")
-
-@dp.callback_query(F.data == "habits")
-async def show_habits(call: CallbackQuery):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT id, name, streak FROM habits WHERE user_id=?", (call.from_user.id,))
-        rows = await cur.fetchall()
-
-    for h in rows:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✔️", callback_data=f"done_{h[0]}")]
-        ])
-        await call.message.answer(f"{h[1]} | 🔥 {h[2]}", reply_markup=kb)
-
 @dp.callback_query(F.data.startswith("done_"))
 async def done_habit(call: CallbackQuery):
     hid = int(call.data.split("_")[1])
@@ -308,7 +296,7 @@ async def done_habit(call: CallbackQuery):
         last_done = datetime.fromisoformat(last_done).date() if last_done else None
 
         if last_done == now:
-            await call.message.answer("Уже отмечено сегодня")
+            await call.message.answer("Уже отмечено")
             return
 
         if last_done == now - timedelta(days=1):
@@ -322,55 +310,25 @@ async def done_habit(call: CallbackQuery):
         )
         await db.commit()
 
-    await call.message.edit_text(f"🔥 Серия: {streak}")
-
-# ======================
-# МЕНЮ
-# ======================
-def menu():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📌 Заметки", callback_data="notes")],
-        [InlineKeyboardButton(text="💪 Привычки", callback_data="habits")]
-    ])
-
-# ======================
-# СТАРТ
-# ======================
-@dp.message(CommandStart())
-async def start(message: Message):
-    await message.answer("Привет 👋", reply_markup=menu())
-
-# ======================
-# ЧАТ
-# ======================
-@dp.message()
-async def chat(message: Message):
-    try:
-        text = fix_layout(message.text)
-
-        await save_memory(message.from_user.id, "user", text)
-        await update_emotion(message.from_user.id, text)
-
-        answer = await ask_ai(message.from_user.id, text)
-
-        await save_memory(message.from_user.id, "assistant", answer)
-
-        await message.answer(answer, reply_markup=menu())
-
-    except Exception as e:
-        print("❌ CHAT ERROR:", e)
-        await message.answer("Ошибка")
+    await call.message.edit_text(habit_feedback(streak))
 
 # ======================
 # MAIN
 # ======================
 async def main():
     await init_db()
-    scheduler.start()
-    await load_reminders()
+
+    if IS_MAIN:
+        scheduler.start()
+        await load_reminders()
 
     logging.info("🚀 БОТ ЗАПУЩЕН")
-    await dp.start_polling(bot)
+
+    if IS_MAIN:
+        await dp.start_polling(bot)
+    else:
+        while True:
+            await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     asyncio.run(main())
