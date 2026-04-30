@@ -8,11 +8,12 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.context import FSMContext
+
 
 import aiosqlite
 import httpx
+import redis.asyncio as redis
+
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -21,6 +22,7 @@ logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+REDIS_URL = os.getenv("REDIS_URL")  # ОБЯЗАТЕЛЬНО добавить в Railway
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -29,16 +31,47 @@ DB_PATH = "bot.db"
 scheduler = AsyncIOScheduler()
 
 # ======================
-# 🛑 АНТИ-ДУБЛЬ
+# 🔥 REDIS LOCK (ГЛАВНЫЙ ФИКС)
 # ======================
-IS_MAIN = True
+IS_MAIN = False
+redis_client = None
 
-if os.getenv("RAILWAY_ENVIRONMENT") == "production":
-    replica = os.getenv("RAILWAY_REPLICA_ID")
-    if replica and replica != "0":
-        IS_MAIN = False
-        logging.warning(f"⛔ Реплика {replica} без polling")
+async def acquire_lock():
+    global IS_MAIN, redis_client
 
+    if not REDIS_URL:
+        logging.warning("⚠️ REDIS_URL нет → fallback в single mode")
+        IS_MAIN = True
+        return
+
+    redis_client = redis.from_url(REDIS_URL)
+
+    lock = await redis_client.set(
+        "bot_lock",
+        "1",
+        ex=60,
+        nx=True
+    )
+
+    if lock:
+        IS_MAIN = True
+        logging.info("✅ Я ГЛАВНЫЙ ИНСТАНС")
+    else:
+        logging.warning("⛔ Уже есть главный инстанс")
+
+# keepalive lock
+async def keep_lock_alive():
+    while True:
+        try:
+            if IS_MAIN and redis_client:
+                await redis_client.expire("bot_lock", 60)
+        except Exception as e:
+            logging.error(f"LOCK ERROR: {e}")
+        await asyncio.sleep(30)
+
+# ======================
+# 🛑 АНТИ-ДУБЛЬ update_id
+# ======================
 LAST_UPDATE_ID = 0
 
 @dp.update.outer_middleware()
@@ -86,26 +119,7 @@ async def init_db():
         """)
         await db.commit()
 
-# ======================
-# FSM
-# ======================
-class ReminderFSM(StatesGroup):
-    text = State()
-    time = State()
 
-# ======================
-# УТИЛЫ
-# ======================
-def fix_layout(text):
-    if not text:
-        return ""
-    layout_map = str.maketrans(
-        "qwertyuiop[]asdfghjkl;'zxcvbnm,.",
-        "йцукенгшщзхъфывапролджэячсмитьбю"
-    )
-    return text.translate(layout_map)
-
-# ======================
 # 🧠 TIME PARSER
 # ======================
 def parse_time(text: str):
@@ -199,7 +213,7 @@ async def behavior_analyze(user_id, text):
         return "Ты часто устаёшь. Добавим привычку: сон до 23:00?"
 
     if mood == "грусть":
-        return "Не давлю. Сделай хотя бы минимум сегодня."
+        return "Окей. Сегодня без давления. Но не пропадай."
 
     return None
 
@@ -211,7 +225,7 @@ async def ask_ai(user_id, text):
     mood = await get_mood(user_id)
 
     messages = [
-        {"role": "system", "content": f"Настроение: {mood}. Будь чуть давящим и мотивирующим."}
+        {"role": "system", "content": f"Настроение: {mood}. Будь немного давящим."}
     ] + context + [{"role": "user", "content": text}]
 
     try:
@@ -253,69 +267,7 @@ async def retention_ping():
             pass
 
 # ======================
-# ПРИВЫЧКИ
-# ======================
-@dp.callback_query(F.data.startswith("done_"))
-async def done_habit(call: CallbackQuery):
-    hid = int(call.data.split("_")[1])
-    now = datetime.now().date()
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT streak, last_done FROM habits WHERE id=?", (hid,))
-        row = await cur.fetchone()
-
-        streak, last_done = row
-        last_done = datetime.fromisoformat(last_done).date() if last_done else None
-
-        missed = False
-        if last_done and last_done < now - timedelta(days=1):
-            missed = True
-
-        if last_done == now:
-            await call.message.answer("Уже отмечено")
-            return
-
-        if last_done == now - timedelta(days=1):
-            streak += 1
-        else:
-            streak = 1
-
-        await db.execute(
-            "UPDATE habits SET streak=?, last_done=? WHERE id=?",
-            (streak, now.isoformat(), hid)
-        )
-        await db.commit()
-
-    await call.message.edit_text(pressure_text(streak, missed))
-
-# ======================
-# ЧАТ
-# ======================
-@dp.message()
-async def chat(message: Message):
-    try:
-        text = fix_layout(message.text)
-
-        await save_memory(message.from_user.id, "user", text)
-        await update_emotion(message.from_user.id, text)
-
-        behavior = await behavior_analyze(message.from_user.id, text)
-
-        answer = await ask_ai(message.from_user.id, text)
-
-        await save_memory(message.from_user.id, "assistant", answer)
-
-        if behavior:
-            await message.answer(behavior)
-
-        await message.answer(answer)
-
-    except Exception as e:
-        print("❌ CHAT ERROR:", e)
-        await message.answer("Ошибка")
-
-# ======================
-# START
+# ХЕНДЛЕРЫ
 # ======================
 @dp.message(CommandStart())
 async def start(message: Message):
@@ -328,28 +280,39 @@ async def start(message: Message):
 
     await message.answer("Привет 👋")
 
+@dp.message()
+async def chat(message: Message):
+    text = message.text
+
+    await save_memory(message.from_user.id, "user", text)
+    await update_emotion(message.from_user.id, text)
+
+    behavior = await behavior_analyze(message.from_user.id, text)
+    answer = await ask_ai(message.from_user.id, text)
+
+    if behavior:
+        await message.answer(behavior)
+
+    await message.answer(answer)
+
 # ======================
 # MAIN
 # ======================
 async def main():
     await init_db()
+    await acquire_lock()
 
     if IS_MAIN:
         scheduler.start()
         scheduler.add_job(retention_ping, "interval", hours=12)
+        asyncio.create_task(keep_lock_alive())
 
     logging.info(f"🚀 БОТ ЗАПУЩЕН | IS_MAIN={IS_MAIN}")
 
-    try:
-        if IS_MAIN:
-            await bot.delete_webhook(drop_pending_updates=True)
-            await dp.start_polling(bot)
-        else:
-            while True:
-                await asyncio.sleep(3600)
-
-    except Exception as e:
-        logging.error(f"❌ MAIN CRASH: {e}")
+    if IS_MAIN:
+        await bot.delete_webhook(drop_pending_updates=True)
+        await dp.start_polling(bot)
+    else:
         while True:
             await asyncio.sleep(3600)
 
