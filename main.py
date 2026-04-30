@@ -9,11 +9,21 @@ import requests
 import asyncpg
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# ================= LOGGING =================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger(__name__)
 
 # ================= CONFIG =================
-
-logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -23,7 +33,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 db = None
-user_states = {}
 
 # ================= DB =================
 
@@ -37,8 +46,6 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
             name TEXT,
-            age INT,
-            gender TEXT,
             style TEXT
         );
         """)
@@ -73,8 +80,7 @@ async def save_message(user_id, role, content):
 async def get_history(user_id):
     async with db.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT role, content FROM messages WHERE user_id=$1 ORDER BY id DESC LIMIT 10",
-            user_id
+            "SELECT role, content FROM messages WHERE user_id=$1 ORDER BY id DESC LIMIT 20"
         )
     return list(reversed(rows))
 
@@ -82,21 +88,30 @@ async def get_history(user_id):
 
 async def save_fact(user_id, text):
     async with db.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO user_facts(user_id, fact) VALUES($1,$2)",
+
+        # проверка на дубликаты
+        exists = await conn.fetchrow(
+            "SELECT * FROM user_facts WHERE user_id=$1 AND fact=$2",
             user_id, text
         )
+
+        if not exists:
+            await conn.execute(
+                "INSERT INTO user_facts(user_id, fact) VALUES($1,$2)",
+                user_id, text
+            )
+            logger.info(f"📌 Новый факт: {text}")
 
 async def get_facts(user_id):
     async with db.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT fact FROM user_facts WHERE user_id=$1 LIMIT 5",
+            "SELECT fact FROM user_facts WHERE user_id=$1 LIMIT 10",
             user_id
         )
     return [r["fact"] for r in rows]
 
 def extract_fact(text):
-    triggers = ["я люблю", "я работаю", "я хочу", "мне нравится"]
+    triggers = ["я люблю", "я работаю", "мне нравится", "я часто"]
     for t in triggers:
         if t in text.lower():
             return text
@@ -118,17 +133,21 @@ def build_prompt(user, history, facts, mode, text):
     prompt = f"Ты общаешься с {user['name']} на ты.\n"
 
     if facts:
-        prompt += "Факты о пользователе:\n" + "\n".join(facts) + "\n\n"
+        prompt += "Важно помнить о пользователе:\n"
+        for f in facts:
+            prompt += f"- {f}\n"
+
+    prompt += "\nДиалог:\n"
 
     for msg in history:
         prompt += f"{msg['role']}: {msg['content']}\n"
 
     if mode == "psycho":
-        prompt += "Будь максимально эмпатичным.\n"
+        prompt += "\nРежим: психолог. Максимальная эмпатия.\n"
     elif mode == "doctor":
-        prompt += "Отвечай как врач, без назначения лекарств.\n"
+        prompt += "\nРежим: врач. Кратко и без лекарств.\n"
 
-    prompt += f"user: {text}"
+    prompt += f"\nuser: {text}"
 
     return prompt
 
@@ -144,8 +163,16 @@ def ask_ai(prompt):
             },
             timeout=15
         )
-        return r.json()["choices"][0]["message"]["content"]
-    except:
+
+        data = r.json()
+        reply = data["choices"][0]["message"]["content"]
+
+        logger.info(f"💬 AI: {reply[:100]}")
+
+        return reply
+
+    except Exception as e:
+        logger.error(f"❌ AI ERROR: {e}")
         return None
 
 # ================= HANDLER =================
@@ -162,10 +189,8 @@ async def handle(message: types.Message):
         await message.answer("Напиши /start")
         return
 
-    # сохраняем сообщение
     await save_message(user_id, "user", text)
 
-    # извлекаем факт
     fact = extract_fact(text)
     if fact:
         await save_fact(user_id, fact)
@@ -174,9 +199,14 @@ async def handle(message: types.Message):
     facts = await get_facts(user_id)
 
     mode = detect_mode(text)
+    logger.info(f"🧠 MODE: {mode}")
+
     prompt = build_prompt(user, history, facts, mode, text)
 
-    reply = ask_ai(prompt) or "Не совсем понял 🙏"
+    reply = ask_ai(prompt)
+
+    if not reply or len(reply) < 5:
+        reply = "Не совсем понял, уточни 🙏"
 
     await save_message(user_id, "assistant", reply)
 
@@ -201,12 +231,13 @@ async def start_health():
 # ================= MAIN =================
 
 async def main():
-    print("🚀 БОТ ЗАПУЩЕН")
+    logger.info("🚀 БОТ ЗАПУЩЕН")
 
     run_uid = os.getenv("RAILWAY_RUN_UID")
     deploy_id = os.getenv("RAILWAY_DEPLOYMENT_ID")
 
     if run_uid and deploy_id and run_uid != deploy_id:
+        logger.warning("⛔ Второй инстанс — выходим")
         return
 
     await init_db()
