@@ -12,10 +12,8 @@ logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+QWEN_KEY = os.getenv("QWEN_API_KEY")
 OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
-GROK_KEY = os.getenv("GROK_API_KEY")
-KIE_KEY = os.getenv("KIE_API_KEY")
-GEMINI_KEY = os.getenv("GEMINI_KEY")
 
 ADMIN_ID = 8590402564
 
@@ -33,8 +31,8 @@ SYSTEM_PROMPT = """
 
 Правила:
 - Всегда отвечай на русском языке
-- Пиши как человек
-- Добавляй лёгкую эмоцию
+- Пиши естественно, как человек
+- Не будь сухим
 - Поддерживай диалог
 
 Если не понял:
@@ -47,7 +45,7 @@ def safe_get_content(data):
     try:
         return data["choices"][0]["message"]["content"]
     except:
-        print("❌ Неправильный формат:", data)
+        print("❌ Формат ответа:", data)
         return None
 
 
@@ -55,6 +53,61 @@ def is_russian(text):
     if not text:
         return False
     return any("а" <= c <= "я" or "А" <= c <= "Я" for c in text)
+
+# ================= QWEN =================
+
+def ask_qwen(user_id, message):
+    if not QWEN_KEY:
+        return None
+
+    print("🧠 QWEN")
+
+    history = user_memory.get(user_id, [])
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages += history[-5:]
+    messages.append({"role": "user", "content": message})
+
+    try:
+        response = requests.post(
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
+            headers={
+                "Authorization": f"Bearer {QWEN_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "qwen-turbo",
+                "input": {
+                    "messages": messages
+                },
+                "parameters": {
+                    "temperature": 0.85
+                }
+            },
+            timeout=15
+        )
+
+        if response.status_code != 200:
+            print("❌ QWEN:", response.text)
+            return None
+
+        data = response.json()
+
+        try:
+            reply = data["output"]["choices"][0]["message"]["content"]
+        except:
+            print("❌ QWEN формат:", data)
+            return None
+
+        history.append({"role": "user", "content": message})
+        history.append({"role": "assistant", "content": reply})
+        user_memory[user_id] = history[-10:]
+
+        return reply
+
+    except Exception as e:
+        print("❌ QWEN EX:", e)
+        return None
 
 # ================= OPENROUTER =================
 
@@ -80,7 +133,7 @@ def ask_openrouter(user_id, message):
             json={
                 "model": "mistralai/mixtral-8x7b-instruct",
                 "messages": messages,
-                "temperature": 0.8
+                "temperature": 0.85
             },
             timeout=15
         )
@@ -105,111 +158,6 @@ def ask_openrouter(user_id, message):
         print("❌ OpenRouter EX:", e)
         return None
 
-# ================= GROK =================
-
-def ask_grok(message):
-    if not GROK_KEY:
-        return None
-
-    print("🧠 GROK")
-
-    try:
-        response = requests.post(
-            "https://api.x.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROK_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "grok-1",
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": message}
-                ]
-            },
-            timeout=15
-        )
-
-        if response.status_code != 200:
-            print("❌ GROK:", response.text)
-            return None
-
-        return safe_get_content(response.json())
-
-    except Exception as e:
-        print("❌ GROK EX:", e)
-        return None
-
-# ================= KIE =================
-
-def ask_kie(message):
-    if not KIE_KEY:
-        return None
-
-    print("🧠 KIE")
-
-    try:
-        response = requests.post(
-            "https://api.kie.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {KIE_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": message}
-                ]
-            },
-            timeout=15
-        )
-
-        if response.status_code != 200:
-            print("❌ KIE:", response.text)
-            return None
-
-        return safe_get_content(response.json())
-
-    except Exception as e:
-        print("❌ KIE EX:", e)
-        return None
-
-# ================= GEMINI =================
-
-def ask_gemini(message):
-    if not GEMINI_KEY:
-        return None
-
-    print("🧠 GEMINI")
-
-    try:
-        response = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_KEY}",
-            headers={"Content-Type": "application/json"},
-            json={
-                "contents": [
-                    {
-                        "parts": [
-                            {"text": SYSTEM_PROMPT + "\n\n" + message}
-                        ]
-                    }
-                ]
-            },
-            timeout=15
-        )
-
-        if response.status_code != 200:
-            print("❌ GEMINI:", response.text)
-            return None
-
-        data = response.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-
-    except Exception as e:
-        print("❌ GEMINI EX:", e)
-        return None
-
 # ================= HANDLER =================
 
 @dp.message()
@@ -220,17 +168,20 @@ async def handle_message(message: types.Message):
     if not is_russian(text):
         text = f"Ответь на русском: {text}"
 
-    reply = (
-        ask_openrouter(user_id, text)
-        or ask_grok(text)
-        or ask_kie(text)
-        or ask_gemini(text)
-    )
+    # 1. QWEN (основной)
+    reply = ask_qwen(user_id, text)
+    source = "Qwen"
+
+    # 2. fallback
+    if not reply:
+        reply = ask_openrouter(user_id, text)
+        source = "OpenRouter"
 
     if not reply:
-        reply = "❌ Все AI сейчас недоступны"
+        reply = "❌ AI временно недоступны"
+        source = "None"
 
-    await message.answer(reply)
+    await message.answer(f"{reply}\n\n— 🧠 {source}")
 
 # ================= HEALTH =================
 
