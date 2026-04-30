@@ -60,13 +60,16 @@ menu = ReplyKeyboardMarkup(
 def parse_time(text):
     text = text.lower()
 
-    if "мин" in text:
-        num = int("".join(filter(str.isdigit, text)) or 1)
-        return datetime.now() + timedelta(minutes=num)
+    try:
+        if "мин" in text:
+            num = int("".join(filter(str.isdigit, text)) or 1)
+            return datetime.now() + timedelta(minutes=num)
 
-    if "час" in text:
-        num = int("".join(filter(str.isdigit, text)) or 1)
-        return datetime.now() + timedelta(hours=num)
+        if "час" in text:
+            num = int("".join(filter(str.isdigit, text)) or 1)
+            return datetime.now() + timedelta(hours=num)
+    except:
+        return None
 
     return None
 
@@ -95,7 +98,7 @@ async def scheduler():
 async def start(message: types.Message):
     await message.answer("Привет! Я помогу с напоминаниями 👇", reply_markup=menu)
 
-# === создать ===
+# === создание напоминания ===
 
 @dp.message(F.text.contains("напомни") | (F.text == "➕ Создать напоминание"))
 async def create_reminder(message: types.Message, state: FSMContext):
@@ -183,10 +186,11 @@ async def start_health():
 async def main():
     logging.info("🚀 БОТ ЗАПУЩЕН")
 
-    # анти-дубль
-    if os.getenv("RAILWAY_RUN_UID") != os.getenv("RAILWAY_DEPLOYMENT_ID"):
-        logging.warning("⛔ второй инстанс")
-        return
+    # 🛑 анти-дубль Railway (правильный)
+    if os.getenv("RAILWAY_ENVIRONMENT") == "production":
+        if os.getenv("RAILWAY_REPLICA_ID") not in (None, "0"):
+            logging.warning("⛔ Второй инстанс — выходим")
+            return
 
     await init_db()
     await start_health()
