@@ -15,6 +15,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 GROK_KEY = os.getenv("GROK_KEY")
 KIE_KEY = os.getenv("KIE_KEY")
+GEMINI_KEY = os.getenv("GEMINI_KEY")  # 👈 НОВОЕ
 
 ADMIN_ID = 8590402564
 
@@ -33,7 +34,7 @@ SYSTEM_PROMPT = """
 Правила:
 - Всегда отвечай на русском языке (если пользователь не попросил иначе)
 - Пиши естественно, как человек
-- Добавляй лёгкую живость в ответ
+- Добавляй лёгкую живость
 - Поддерживай диалог
 
 Если не понял:
@@ -46,7 +47,7 @@ def safe_get_content(data):
     try:
         return data["choices"][0]["message"]["content"]
     except Exception:
-        print("❌ Неправильный формат ответа:", data)
+        print("❌ Неправильный формат:", data)
         return None
 
 
@@ -57,6 +58,9 @@ def is_russian(text):
 
 def ask_openrouter(user_id, message):
     print("🧠 OPENROUTER")
+
+    if not OPENROUTER_KEY:
+        return None
 
     history = user_memory.get(user_id, [])
 
@@ -80,18 +84,16 @@ def ask_openrouter(user_id, message):
         )
 
         if response.status_code != 200:
-            print("❌ OpenRouter HTTP:", response.status_code, response.text)
+            print("❌ OpenRouter:", response.text)
             return None
 
         data = response.json()
         reply = safe_get_content(data)
 
-        if not reply:
-            return None
-
-        history.append({"role": "user", "content": message})
-        history.append({"role": "assistant", "content": reply})
-        user_memory[user_id] = history[-10:]
+        if reply:
+            history.append({"role": "user", "content": message})
+            history.append({"role": "assistant", "content": reply})
+            user_memory[user_id] = history[-10:]
 
         return reply
 
@@ -104,6 +106,9 @@ def ask_openrouter(user_id, message):
 def ask_grok(message):
     print("🧠 GROK")
 
+    if not GROK_KEY:
+        return None
+
     try:
         response = requests.post(
             "https://api.x.ai/v1/chat/completions",
@@ -112,18 +117,17 @@ def ask_grok(message):
                 "Content-Type": "application/json"
             },
             json={
-                "model": "grok-beta",
+                "model": "grok-1",
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": message}
-                ],
-                "temperature": 0.85
+                ]
             },
             timeout=15
         )
 
         if response.status_code != 200:
-            print("❌ GROK HTTP:", response.status_code, response.text)
+            print("❌ GROK:", response.text)
             return None
 
         return safe_get_content(response.json())
@@ -137,6 +141,9 @@ def ask_grok(message):
 def ask_kie(message):
     print("🧠 KIE")
 
+    if not KIE_KEY:
+        return None
+
     try:
         response = requests.post(
             "https://api.kie.ai/v1/chat/completions",
@@ -149,20 +156,53 @@ def ask_kie(message):
                 "messages": [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": message}
-                ],
-                "temperature": 0.85
+                ]
             },
             timeout=15
         )
 
         if response.status_code != 200:
-            print("❌ KIE HTTP:", response.status_code, response.text)
+            print("❌ KIE:", response.text)
             return None
 
         return safe_get_content(response.json())
 
     except Exception as e:
         print("❌ KIE:", e)
+        return None
+
+# ================= GEMINI =================
+
+def ask_gemini(message):
+    print("🧠 GEMINI")
+
+    if not GEMINI_KEY:
+        return None
+
+    try:
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
+            headers={"Content-Type": "application/json"},
+            json={
+                "contents": [
+                    {
+                        "parts": [{"text": SYSTEM_PROMPT + "\n\n" + message}]
+                    }
+                ]
+            },
+            timeout=15
+        )
+
+        if response.status_code != 200:
+            print("❌ GEMINI:", response.text)
+            return None
+
+        data = response.json()
+
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+
+    except Exception as e:
+        print("❌ GEMINI:", e)
         return None
 
 # ================= HANDLER =================
@@ -182,6 +222,9 @@ async def handle_message(message: types.Message):
 
     if not reply:
         reply = ask_kie(text)
+
+    if not reply:
+        reply = ask_gemini(text)  # 👈 НОВОЕ
 
     if not reply:
         reply = "❌ Все AI сейчас недоступны"
@@ -211,7 +254,6 @@ async def start_health_server():
 async def main():
     print("🚀 БОТ ЗАПУЩЕН")
 
-    # 🛑 анти-дубль Railway
     run_uid = os.getenv("RAILWAY_RUN_UID")
     deploy_id = os.getenv("RAILWAY_DEPLOYMENT_ID")
 
