@@ -322,13 +322,23 @@ async def main():
         scheduler.start()
         await load_reminders()
 
-    logging.info("🚀 БОТ ЗАПУЩЕН")
+    logging.info(f"🚀 БОТ ЗАПУЩЕН | IS_MAIN={IS_MAIN}")
 
-    if IS_MAIN:
-        await dp.start_polling(bot)
-    else:
+    try:
+        if IS_MAIN:
+            # 🔥 важно — убираем webhook
+            await bot.delete_webhook(drop_pending_updates=True)
+
+            await dp.start_polling(bot)
+
+        else:
+            # вторичная реплика просто живёт
+            while True:
+                await asyncio.sleep(3600)
+
+    except Exception as e:
+        logging.error(f"❌ MAIN CRASH: {e}")
+
+        # 🔥 не даём контейнеру умереть
         while True:
             await asyncio.sleep(3600)
-
-if __name__ == "__main__":
-    asyncio.run(main())
