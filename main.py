@@ -6,9 +6,10 @@ import random
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart
-
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
 
 import aiosqlite
 import httpx
@@ -22,7 +23,7 @@ logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-REDIS_URL = os.getenv("REDIS_URL")  # ОБЯЗАТЕЛЬНО добавить в Railway
+REDIS_URL = os.getenv("REDIS_URL")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -31,7 +32,7 @@ DB_PATH = "bot.db"
 scheduler = AsyncIOScheduler()
 
 # ======================
-# 🔥 REDIS LOCK (ГЛАВНЫЙ ФИКС)
+# 🔥 REDIS LOCK
 # ======================
 IS_MAIN = False
 redis_client = None
@@ -40,50 +41,39 @@ async def acquire_lock():
     global IS_MAIN, redis_client
 
     if not REDIS_URL:
-        logging.warning("⚠️ REDIS_URL нет → fallback в single mode")
         IS_MAIN = True
         return
 
     redis_client = redis.from_url(REDIS_URL)
 
-    lock = await redis_client.set(
-        "bot_lock",
-        "1",
-        ex=60,
-        nx=True
-    )
+    lock = await redis_client.set("bot_lock", "1", ex=60, nx=True)
 
     if lock:
         IS_MAIN = True
-        logging.info("✅ Я ГЛАВНЫЙ ИНСТАНС")
+        logging.info("✅ MAIN INSTANCE")
     else:
-        logging.warning("⛔ Уже есть главный инстанс")
+        logging.warning("⛔ SECONDARY INSTANCE")
 
-# keepalive lock
 async def keep_lock_alive():
     while True:
-        try:
-            if IS_MAIN and redis_client:
-                await redis_client.expire("bot_lock", 60)
-        except Exception as e:
-            logging.error(f"LOCK ERROR: {e}")
+        if IS_MAIN and redis_client:
+            await redis_client.expire("bot_lock", 60)
         await asyncio.sleep(30)
 
 # ======================
-# 🛑 АНТИ-ДУБЛЬ update_id
+# 🛑 АНТИ-ДУБЛЬ
 # ======================
 LAST_UPDATE_ID = 0
 
 @dp.update.outer_middleware()
-async def anti_duplicate_middleware(handler, event, data):
+async def anti_duplicate(handler, event, data):
     global LAST_UPDATE_ID
+    upd = data.get("event_update")
 
-    update = data.get("event_update")
-
-    if update and hasattr(update, "update_id"):
-        if update.update_id <= LAST_UPDATE_ID:
+    if upd and hasattr(upd, "update_id"):
+        if upd.update_id <= LAST_UPDATE_ID:
             return
-        LAST_UPDATE_ID = update.update_id
+        LAST_UPDATE_ID = upd.update_id
 
     return await handler(event, data)
 
@@ -104,6 +94,13 @@ async def init_db():
             content TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS reminders(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            text TEXT,
+            remind_at TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS habits(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -119,10 +116,17 @@ async def init_db():
         """)
         await db.commit()
 
-
-# 🧠 TIME PARSER
 # ======================
-def parse_time(text: str):
+# FSM
+# ======================
+class ReminderFSM(StatesGroup):
+    text = State()
+    time = State()
+
+# ======================
+# TIME PARSER
+# ======================
+def parse_time(text):
     text = text.lower()
     now = datetime.now()
 
@@ -133,16 +137,16 @@ def parse_time(text: str):
         return now.replace(hour=18, minute=30)
 
     if "на выходных" in text:
-        days_ahead = (5 - now.weekday()) % 7
-        return (now + timedelta(days=days_ahead)).replace(hour=12, minute=0)
+        days = (5 - now.weekday()) % 7
+        return (now + timedelta(days=days)).replace(hour=12, minute=0)
 
-    minutes = re.search(r'через (\d+) минут', text)
-    hours = re.search(r'через (\d+) час', text)
+    m = re.search(r'через (\d+) минут', text)
+    h = re.search(r'через (\d+) час', text)
 
-    if minutes:
-        return now + timedelta(minutes=int(minutes.group(1)))
-    if hours:
-        return now + timedelta(hours=int(hours.group(1)))
+    if m:
+        return now + timedelta(minutes=int(m.group(1)))
+    if h:
+        return now + timedelta(hours=int(h.group(1)))
 
     if "завтра" in text:
         return (now + timedelta(days=1)).replace(hour=9, minute=0)
@@ -150,26 +154,23 @@ def parse_time(text: str):
     return None
 
 # ======================
-# ПАМЯТЬ
+# MEMORY + EMOTION
 # ======================
-async def save_memory(user_id, role, content):
+async def save_memory(uid, role, content):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT INTO memory VALUES (?, ?, ?)", (user_id, role, content))
+        await db.execute("INSERT INTO memory VALUES (?, ?, ?)", (uid, role, content))
         await db.commit()
 
-async def get_memory(user_id):
+async def get_memory(uid):
     async with aiosqlite.connect(DB_PATH) as db:
-        cursor = await db.execute(
+        cur = await db.execute(
             "SELECT role, content FROM memory WHERE user_id=? ORDER BY rowid DESC LIMIT 20",
-            (user_id,)
+            (uid,)
         )
-        rows = await cursor.fetchall()
+        rows = await cur.fetchall()
         return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
 
-# ======================
-# ЭМОЦИИ
-# ======================
-async def update_emotion(user_id, text):
+async def update_emotion(uid, text):
     mood = "нейтральное"
     if "груст" in text:
         mood = "грусть"
@@ -177,37 +178,32 @@ async def update_emotion(user_id, text):
         mood = "радость"
 
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT INTO emotions VALUES (?, ?)", (user_id, mood))
+        await db.execute("INSERT INTO emotions VALUES (?, ?)", (uid, mood))
         await db.commit()
 
-async def get_mood(user_id):
+async def get_mood(uid):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT mood FROM emotions WHERE user_id=? ORDER BY rowid DESC LIMIT 1",
-            (user_id,)
+            (uid,)
         )
         row = await cur.fetchone()
         return row[0] if row else "нейтральное"
 
 # ======================
-# 💪 ДАВЛЕНИЕ
+# ДАВЛЕНИЕ + ANALYZE
 # ======================
 def pressure_text(streak, missed=False):
     if missed:
         return "Ты вчера пропустил. Это откат. Делаешь сегодня или сливаешь?"
-
     if streak >= 7:
         return "Ты уже в системе. Не ломай её."
     if streak >= 3:
         return "Неплохо. Но расслабишься — откатишься."
-
     return "Начал — доведи."
 
-# ======================
-# 🧠 ПОВЕДЕНКА
-# ======================
-async def behavior_analyze(user_id, text):
-    mood = await get_mood(user_id)
+async def behavior_analyze(uid, text):
+    mood = await get_mood(uid)
 
     if "устал" in text:
         return "Ты часто устаёшь. Добавим привычку: сон до 23:00?"
@@ -220,13 +216,11 @@ async def behavior_analyze(user_id, text):
 # ======================
 # AI
 # ======================
-async def ask_ai(user_id, text):
-    context = await get_memory(user_id)
-    mood = await get_mood(user_id)
+async def ask_ai(uid, text):
+    ctx = await get_memory(uid)
+    mood = await get_mood(uid)
 
-    messages = [
-        {"role": "system", "content": f"Настроение: {mood}. Будь немного давящим."}
-    ] + context + [{"role": "user", "content": text}]
+    messages = [{"role": "system", "content": f"Настроение: {mood}. Будь давящим."}] + ctx + [{"role": "user", "content": text}]
 
     try:
         async with httpx.AsyncClient() as client:
@@ -238,22 +232,69 @@ async def ask_ai(user_id, text):
             )
             return r.json()["choices"][0]["message"]["content"]
     except:
-        return "❌ AI недоступен"
+        return "❌ AI ошибка"
+
+# ======================
+# REMINDERS
+# ======================
+async def send_reminder(uid, text):
+    await bot.send_message(uid, f"⏰ {text}")
+
+@dp.message(F.text.contains("напомни"))
+async def reminder_start(msg: Message, state: FSMContext):
+    await state.set_state(ReminderFSM.text)
+    await state.update_data(text=msg.text)
+    await msg.answer("Когда?")
+
+@dp.message(ReminderFSM.text)
+async def reminder_time(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    dt = parse_time(msg.text)
+
+    if not dt:
+        await msg.answer("Не понял время")
+        return
+
+    scheduler.add_job(send_reminder, "date", run_date=dt, args=[msg.from_user.id, data["text"]])
+
+    await msg.answer("Поставил ⏰")
+    await state.clear()
+
+# ======================
+# HABITS
+# ======================
+@dp.callback_query(F.data.startswith("done_"))
+async def done(call: CallbackQuery):
+    hid = int(call.data.split("_")[1])
+    now = datetime.now().date()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT streak,last_done FROM habits WHERE id=?", (hid,))
+        row = await cur.fetchone()
+
+        streak, last = row
+        last = datetime.fromisoformat(last).date() if last else None
+
+        missed = last and last < now - timedelta(days=1)
+
+        if last == now:
+            await call.answer("Уже было")
+            return
+
+        streak = streak + 1 if last == now - timedelta(days=1) else 1
+
+        await db.execute(
+            "UPDATE habits SET streak=?, last_done=? WHERE id=?",
+            (streak, now.isoformat(), hid)
+        )
+        await db.commit()
+
+    await call.message.edit_text(pressure_text(streak, missed))
 
 # ======================
 # RETENTION
 # ======================
-FACTS = [
-    "Факт: мозг потребляет 20% энергии тела",
-    "Факт: привычки формируются за 21-30 дней"
-]
-
-QUOTES = [
-    "Дисциплина — это выбор",
-    "Ты либо действуешь, либо ищешь оправдания"
-]
-
-async def retention_ping():
+async def retention():
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT user_id FROM users")
         users = await cur.fetchall()
@@ -261,39 +302,40 @@ async def retention_ping():
     for u in users:
         try:
             await bot.send_message(u[0], "Ты пропал. Возвращайся.")
-            await bot.send_message(u[0], random.choice(FACTS))
-            await bot.send_message(u[0], random.choice(QUOTES))
         except:
             pass
 
 # ======================
-# ХЕНДЛЕРЫ
+# CHAT
+# ======================
+@dp.message()
+async def chat(msg: Message):
+    text = msg.text
+
+    await save_memory(msg.from_user.id, "user", text)
+    await update_emotion(msg.from_user.id, text)
+
+    behavior = await behavior_analyze(msg.from_user.id, text)
+    answer = await ask_ai(msg.from_user.id, text)
+
+    if behavior:
+        await msg.answer(behavior)
+
+    await msg.answer(answer)
+
+# ======================
+# START
 # ======================
 @dp.message(CommandStart())
-async def start(message: Message):
+async def start(msg: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT OR IGNORE INTO users(user_id, name) VALUES (?, ?)",
-            (message.from_user.id, message.from_user.first_name)
+            "INSERT OR IGNORE INTO users VALUES (?, ?)",
+            (msg.from_user.id, msg.from_user.first_name)
         )
         await db.commit()
 
-    await message.answer("Привет 👋")
-
-@dp.message()
-async def chat(message: Message):
-    text = message.text
-
-    await save_memory(message.from_user.id, "user", text)
-    await update_emotion(message.from_user.id, text)
-
-    behavior = await behavior_analyze(message.from_user.id, text)
-    answer = await ask_ai(message.from_user.id, text)
-
-    if behavior:
-        await message.answer(behavior)
-
-    await message.answer(answer)
+    await msg.answer("Привет 👋")
 
 # ======================
 # MAIN
@@ -304,10 +346,8 @@ async def main():
 
     if IS_MAIN:
         scheduler.start()
-        scheduler.add_job(retention_ping, "interval", hours=12)
+        scheduler.add_job(retention, "interval", hours=12)
         asyncio.create_task(keep_lock_alive())
-
-    logging.info(f"🚀 БОТ ЗАПУЩЕН | IS_MAIN={IS_MAIN}")
 
     if IS_MAIN:
         await bot.delete_webhook(drop_pending_updates=True)
