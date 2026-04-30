@@ -2,10 +2,11 @@ import asyncio
 import logging
 import os
 import re
+import random
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import CommandStart
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
@@ -28,7 +29,7 @@ DB_PATH = "bot.db"
 scheduler = AsyncIOScheduler()
 
 # ======================
-# 🛑 АНТИ-ДУБЛЬ (НОРМАЛЬНЫЙ)
+# 🛑 АНТИ-ДУБЛЬ
 # ======================
 IS_MAIN = True
 
@@ -37,6 +38,21 @@ if os.getenv("RAILWAY_ENVIRONMENT") == "production":
     if replica and replica != "0":
         IS_MAIN = False
         logging.warning(f"⛔ Реплика {replica} без polling")
+
+LAST_UPDATE_ID = 0
+
+@dp.update.outer_middleware()
+async def anti_duplicate_middleware(handler, event, data):
+    global LAST_UPDATE_ID
+
+    update = data.get("event_update")
+
+    if update and hasattr(update, "update_id"):
+        if update.update_id <= LAST_UPDATE_ID:
+            return
+        LAST_UPDATE_ID = update.update_id
+
+    return await handler(event, data)
 
 # ======================
 # БАЗА
@@ -49,24 +65,10 @@ async def init_db():
             name TEXT
         );
 
-        CREATE TABLE IF NOT EXISTS notes(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            text TEXT,
-            category TEXT
-        );
-
         CREATE TABLE IF NOT EXISTS memory(
             user_id INTEGER,
             role TEXT,
             content TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS reminders(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            text TEXT,
-            remind_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS habits(
@@ -104,61 +106,34 @@ def fix_layout(text):
     return text.translate(layout_map)
 
 # ======================
-# 🧠 НАТУРАЛЬНЫЙ ПАРСЕР ВРЕМЕНИ
+# 🧠 TIME PARSER
 # ======================
 def parse_time(text: str):
     text = text.lower()
     now = datetime.now()
 
-    # через X минут/часов
+    if "вечером" in text:
+        return now.replace(hour=19, minute=0)
+
+    if "после работы" in text:
+        return now.replace(hour=18, minute=30)
+
+    if "на выходных" in text:
+        days_ahead = (5 - now.weekday()) % 7
+        return (now + timedelta(days=days_ahead)).replace(hour=12, minute=0)
+
     minutes = re.search(r'через (\d+) минут', text)
     hours = re.search(r'через (\d+) час', text)
 
     if minutes:
         return now + timedelta(minutes=int(minutes.group(1)))
-
     if hours:
         return now + timedelta(hours=int(hours.group(1)))
 
-    # завтра
     if "завтра" in text:
-        base = now + timedelta(days=1)
-        if "вечер" in text:
-            return base.replace(hour=19, minute=0)
-        if "утро" in text:
-            return base.replace(hour=9, minute=0)
+        return (now + timedelta(days=1)).replace(hour=9, minute=0)
 
-        match = re.search(r'(\d{1,2}):(\d{2})', text)
-        if match:
-            return base.replace(hour=int(match.group(1)), minute=int(match.group(2)))
-
-        return base.replace(hour=9, minute=0)
-
-    # дни недели
-    weekdays = {
-        "понедельник": 0, "вторник": 1, "среду": 2,
-        "четверг": 3, "пятницу": 4, "субботу": 5, "воскресенье": 6
-    }
-
-    for day, idx in weekdays.items():
-        if day in text:
-            days_ahead = (idx - now.weekday()) % 7
-            if days_ahead == 0:
-                days_ahead = 7
-
-            base = now + timedelta(days=days_ahead)
-
-            match = re.search(r'(\d{1,2}):(\d{2})', text)
-            if match:
-                return base.replace(hour=int(match.group(1)), minute=int(match.group(2)))
-
-            return base.replace(hour=10, minute=0)
-
-    # fallback ISO
-    try:
-        return datetime.fromisoformat(text)
-    except:
-        return None
+    return None
 
 # ======================
 # ПАМЯТЬ
@@ -201,18 +176,32 @@ async def get_mood(user_id):
         return row[0] if row else "нейтральное"
 
 # ======================
-# 💪 ПОВЕДЕНКА / STREAK
+# 💪 ДАВЛЕНИЕ
 # ======================
-def habit_feedback(streak):
-    if streak == 1:
-        return "Начало положено 💪"
-    if streak == 3:
-        return "Уже формируется привычка 🔥"
-    if streak == 7:
-        return "Ты стабилен. Это уже система ⚙️"
-    if streak >= 30:
-        return "Ты машина. Это уровень 🧠"
-    return f"Серия: {streak}"
+def pressure_text(streak, missed=False):
+    if missed:
+        return "Ты вчера пропустил. Это откат. Делаешь сегодня или сливаешь?"
+
+    if streak >= 7:
+        return "Ты уже в системе. Не ломай её."
+    if streak >= 3:
+        return "Неплохо. Но расслабишься — откатишься."
+
+    return "Начал — доведи."
+
+# ======================
+# 🧠 ПОВЕДЕНКА
+# ======================
+async def behavior_analyze(user_id, text):
+    mood = await get_mood(user_id)
+
+    if "устал" in text:
+        return "Ты часто устаёшь. Добавим привычку: сон до 23:00?"
+
+    if mood == "грусть":
+        return "Не давлю. Сделай хотя бы минимум сегодня."
+
+    return None
 
 # ======================
 # AI
@@ -222,7 +211,7 @@ async def ask_ai(user_id, text):
     mood = await get_mood(user_id)
 
     messages = [
-        {"role": "system", "content": f"Настроение: {mood}. Добавляй мотивацию если уместно."}
+        {"role": "system", "content": f"Настроение: {mood}. Будь чуть давящим и мотивирующим."}
     ] + context + [{"role": "user", "content": text}]
 
     try:
@@ -238,47 +227,30 @@ async def ask_ai(user_id, text):
         return "❌ AI недоступен"
 
 # ======================
-# НАПОМИНАНИЯ
+# RETENTION
 # ======================
-async def send_reminder(user_id, text):
-    await bot.send_message(user_id, f"⏰ {text}")
+FACTS = [
+    "Факт: мозг потребляет 20% энергии тела",
+    "Факт: привычки формируются за 21-30 дней"
+]
 
-async def load_reminders():
+QUOTES = [
+    "Дисциплина — это выбор",
+    "Ты либо действуешь, либо ищешь оправдания"
+]
+
+async def retention_ping():
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT user_id, text, remind_at FROM reminders")
-        rows = await cur.fetchall()
+        cur = await db.execute("SELECT user_id FROM users")
+        users = await cur.fetchall()
 
-    for r in rows:
-        dt = datetime.fromisoformat(r[2])
-        scheduler.add_job(send_reminder, "date", run_date=dt, args=[r[0], r[1]])
-
-@dp.message(F.text.lower().contains("напомни"))
-async def reminder_start(message: Message, state: FSMContext):
-    await state.set_state(ReminderFSM.text)
-    await state.update_data(text=message.text)
-    await message.answer("Когда? (например: завтра вечером, через 2 часа)")
-
-@dp.message(ReminderFSM.text)
-async def reminder_time(message: Message, state: FSMContext):
-    data = await state.get_data()
-    dt = parse_time(message.text)
-
-    if not dt:
-        await message.answer("Не понял время")
-        return
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO reminders(user_id, text, remind_at) VALUES (?, ?, ?)",
-            (message.from_user.id, data["text"], dt.isoformat())
-        )
-        await db.commit()
-
-    scheduler.add_job(send_reminder, "date", run_date=dt,
-                      args=[message.from_user.id, data["text"]])
-
-    await message.answer("⏰ Напоминание поставлено")
-    await state.clear()
+    for u in users:
+        try:
+            await bot.send_message(u[0], "Ты пропал. Возвращайся.")
+            await bot.send_message(u[0], random.choice(FACTS))
+            await bot.send_message(u[0], random.choice(QUOTES))
+        except:
+            pass
 
 # ======================
 # ПРИВЫЧКИ
@@ -295,6 +267,10 @@ async def done_habit(call: CallbackQuery):
         streak, last_done = row
         last_done = datetime.fromisoformat(last_done).date() if last_done else None
 
+        missed = False
+        if last_done and last_done < now - timedelta(days=1):
+            missed = True
+
         if last_done == now:
             await call.message.answer("Уже отмечено")
             return
@@ -310,7 +286,47 @@ async def done_habit(call: CallbackQuery):
         )
         await db.commit()
 
-    await call.message.edit_text(habit_feedback(streak))
+    await call.message.edit_text(pressure_text(streak, missed))
+
+# ======================
+# ЧАТ
+# ======================
+@dp.message()
+async def chat(message: Message):
+    try:
+        text = fix_layout(message.text)
+
+        await save_memory(message.from_user.id, "user", text)
+        await update_emotion(message.from_user.id, text)
+
+        behavior = await behavior_analyze(message.from_user.id, text)
+
+        answer = await ask_ai(message.from_user.id, text)
+
+        await save_memory(message.from_user.id, "assistant", answer)
+
+        if behavior:
+            await message.answer(behavior)
+
+        await message.answer(answer)
+
+    except Exception as e:
+        print("❌ CHAT ERROR:", e)
+        await message.answer("Ошибка")
+
+# ======================
+# START
+# ======================
+@dp.message(CommandStart())
+async def start(message: Message):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO users(user_id, name) VALUES (?, ?)",
+            (message.from_user.id, message.from_user.first_name)
+        )
+        await db.commit()
+
+    await message.answer("Привет 👋")
 
 # ======================
 # MAIN
@@ -320,25 +336,22 @@ async def main():
 
     if IS_MAIN:
         scheduler.start()
-        await load_reminders()
+        scheduler.add_job(retention_ping, "interval", hours=12)
 
     logging.info(f"🚀 БОТ ЗАПУЩЕН | IS_MAIN={IS_MAIN}")
 
     try:
         if IS_MAIN:
-            # 🔥 важно — убираем webhook
             await bot.delete_webhook(drop_pending_updates=True)
-
             await dp.start_polling(bot)
-
         else:
-            # вторичная реплика просто живёт
             while True:
                 await asyncio.sleep(3600)
 
     except Exception as e:
         logging.error(f"❌ MAIN CRASH: {e}")
-
-        # 🔥 не даём контейнеру умереть
         while True:
             await asyncio.sleep(3600)
+
+if __name__ == "__main__":
+    asyncio.run(main())
