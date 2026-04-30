@@ -1,159 +1,138 @@
-import os
 import asyncio
+import logging
+import os
 import aiohttp
+
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import Message
 from aiogram.filters import Command
 from aiohttp import web
 
-# ================== ENV ==================
+logging.basicConfig(level=logging.INFO)
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 
-print(f"DEBUG TOKEN: {BOT_TOKEN}")
-
-# ================== BOT ==================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ================== AI CLIENTS ==================
+# ================== SYSTEM PROMPTS ==================
 
-async def ask_openai(prompt: str):
-    url = "https://api.openai.com/v1/chat/completions"
+SYSTEM_QWEN = "Ты живой дружелюбный собеседник. Отвечай естественно и понятно."
+SYSTEM_OPENAI = "Ты резервный ассистент. Помогай если основной не справился."
+SYSTEM_GROK = "Ты деловой секретарь. Формулируй чётко, структурированно."
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
+# ================== AI FUNCTIONS ==================
 
-    json_data = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "system", "content": "Ты живой, понимающий собеседник. Отвечай естественно и по-человечески."},
-            {"role": "user", "content": prompt}
-        ]
-    }
-
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=json_data) as resp:
-            data = await resp.json()
-
-            if "error" in data:
-                raise Exception(data["error"]["message"])
-
-            return data["choices"][0]["message"]["content"]
-
-
-async def ask_qwen(prompt: str):
+async def ask_qwen(text):
     url = "https://api.qwen.ai/v1/chat/completions"
-
     headers = {
         "Authorization": f"Bearer {QWEN_API_KEY}",
         "Content-Type": "application/json"
     }
-
-    json_data = {
+    data = {
         "model": "qwen-plus",
         "messages": [
-            {"role": "system", "content": "Ты эмпатичный медицинский ассистент. Дай мягкий, поддерживающий и осторожный ответ без постановки диагноза."},
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": SYSTEM_QWEN},
+            {"role": "user", "content": text}
         ]
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=json_data) as resp:
-            data = await resp.json()
-
-            if "error" in data:
-                raise Exception(data["error"]["message"])
-
-            return data["choices"][0]["message"]["content"]
+        async with session.post(url, json=data, headers=headers) as resp:
+            res = await resp.json()
+            return res["choices"][0]["message"]["content"]
 
 
-async def ask_grok(prompt: str):
+async def ask_openai(text):
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": SYSTEM_OPENAI},
+            {"role": "user", "content": text}
+        ]
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=data, headers=headers) as resp:
+            res = await resp.json()
+            return res["choices"][0]["message"]["content"]
+
+
+async def ask_grok(text):
     url = "https://api.x.ai/v1/chat/completions"
-
     headers = {
         "Authorization": f"Bearer {GROK_API_KEY}",
         "Content-Type": "application/json"
     }
-
-    json_data = {
-        "model": "grok-1",
+    data = {
+        "model": "grok-beta",
         "messages": [
-            {"role": "system", "content": "Ты деловой ассистент. Переформулируй текст чётко, структурированно и профессионально."},
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": SYSTEM_GROK},
+            {"role": "user", "content": text}
         ]
     }
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=json_data) as resp:
-            data = await resp.json()
+        async with session.post(url, json=data, headers=headers) as resp:
+            res = await resp.json()
+            return res["choices"][0]["message"]["content"]
 
-            if "error" in data:
-                raise Exception(data["error"]["message"])
-
-            return data["choices"][0]["message"]["content"]
 
 # ================== ROUTER ==================
 
-def detect_mode(text: str):
-    text = text.lower()
+async def ask_ai(text):
+    text_lower = text.lower()
 
-    medical_words = ["болит", "температура", "симптом", "врач", "лекарство"]
-    business_words = ["сделай текст", "переформулируй", "деловое", "письмо", "запрос"]
-
-    if any(w in text for w in medical_words):
-        return "qwen"
-
-    if any(w in text for w in business_words):
-        return "grok"
-
-    return "openai"
-
-
-async def ask_ai(prompt: str):
-    mode = detect_mode(prompt)
-
-    try:
-        if mode == "qwen":
-            print("🧠 QWEN")
-            return await ask_qwen(prompt)
-
-        if mode == "grok":
+    # если задача/формулировка → Grok
+    if any(w in text_lower for w in ["сделай", "напиши", "сформулируй", "задача", "план"]):
+        try:
             print("🧠 GROK")
-            return await ask_grok(prompt)
+            return await ask_grok(text)
+        except Exception as e:
+            print("❌ Grok:", e)
 
-        print("🧠 OPENAI")
-        return await ask_openai(prompt)
-
+    # основной → Qwen
+    try:
+        print("🧠 QWEN")
+        return await ask_qwen(text)
     except Exception as e:
-        print(f"❌ Ошибка основного AI: {e}")
+        print("❌ Qwen:", e)
 
-        # fallback
-        for fallback in [ask_openai, ask_qwen, ask_grok]:
-            try:
-                return await fallback(prompt)
-            except:
-                continue
+    # резерв → OpenAI
+    try:
+        print("🧠 OPENAI (fallback)")
+        return await ask_openai(text)
+    except Exception as e:
+        print("❌ OpenAI:", e)
 
-        return "⚠️ Все AI сейчас недоступны"
+    return "⚠️ Все AI сейчас недоступны"
+
 
 # ================== HANDLERS ==================
 
 @dp.message(Command("start"))
-async def start_cmd(message: Message):
-    await message.answer("🤖 Бот работает 🚀")
+async def start(message: types.Message):
+    await message.answer("🚀 Бот работает!")
 
 @dp.message()
-async def handle_msg(message: Message):
+async def chat(message: types.Message):
     user_text = message.text
 
-    reply = await ask_ai(user_text)
+    try:
+        response = await ask_ai(user_text)
+    except Exception as e:
+        print("❌ Общая ошибка:", e)
+        response = "⚠️ Ошибка обработки"
 
-    await message.answer(reply)
+    await message.answer(response)
+
 
 # ================== HEALTH SERVER ==================
 
@@ -173,6 +152,7 @@ async def start_health_server():
 
     print("🌐 Health сервер запущен")
 
+
 # ================== MAIN ==================
 
 async def main():
@@ -180,8 +160,11 @@ async def main():
 
     await start_health_server()
 
+    # фикс Telegram конфликта
+    await bot.delete_webhook(drop_pending_updates=True)
+
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
-#gecnj    
