@@ -6,6 +6,8 @@ import requests
 
 from aiogram import Bot, Dispatcher, types
 
+# ================= CONFIG =================
+
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -14,54 +16,37 @@ OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 GROK_KEY = os.getenv("GROK_KEY")
 KIE_KEY = os.getenv("KIE_KEY")
 
+ADMIN_ID = 8590402564
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# =========================
-# ПАМЯТЬ (контекст)
-# =========================
+# ================= MEMORY =================
+
 user_memory = {}
 
-# =========================
-# SYSTEM PROMPT (ВАЖНО!)
-# =========================
+# ================= SYSTEM PROMPT =================
+
 SYSTEM_PROMPT = """
-Ты — умный, живой и дружелюбный AI-ассистент.
+Ты — живой, дружелюбный AI-ассистент.
 
 Правила:
-- Всегда отвечай на русском языке (если пользователь явно не попросил другой язык)
-- Общайся естественно, как человек, а не как робот
-- Добавляй немного эмоций и живости в речь
-- Не будь сухим
-
-Роли:
-- Основной: разговорный ассистент
-- Иногда: помощник, советник, объясняющий
-
-Если не понял пользователя:
-→ скажи: "Не совсем тебя понял, уточни пожалуйста 🙏"
-
-Если сообщение странное/бессмысленное:
-→ мягко уточни, что он имел в виду
-
-Контекст:
-- Запоминай тему разговора
+- Всегда отвечай на русском языке (если пользователь не попросил иначе)
+- Пиши естественно, как человек
+- Не будь сухим, добавляй немного эмоций
 - Поддерживай диалог
 
-Никогда:
-- не переходи на английский без просьбы
-- не пиши сухо как документация
+Если не понял:
+→ "Не совсем тебя понял, уточни пожалуйста 🙏"
 """
 
-# =========================
-# ПРОВЕРКА ЯЗЫКА
-# =========================
+# ================= LANGUAGE =================
+
 def is_russian(text):
     return any("а" <= c <= "я" or "А" <= c <= "Я" for c in text)
 
-# =========================
-# OPENROUTER (основной)
-# =========================
+# ================= OPENROUTER =================
+
 def ask_openrouter(user_id, message):
     print("🧠 OPENROUTER")
 
@@ -87,10 +72,8 @@ def ask_openrouter(user_id, message):
         )
 
         data = response.json()
-
         reply = data["choices"][0]["message"]["content"]
 
-        # сохраняем контекст
         history.append({"role": "user", "content": message})
         history.append({"role": "assistant", "content": reply})
         user_memory[user_id] = history[-10:]
@@ -101,9 +84,8 @@ def ask_openrouter(user_id, message):
         print("❌ OpenRouter:", e)
         return None
 
-# =========================
-# GROK (резерв)
-# =========================
+# ================= GROK =================
+
 def ask_grok(message):
     print("🧠 GROK")
 
@@ -132,9 +114,8 @@ def ask_grok(message):
         print("❌ GROK:", e)
         return None
 
-# =========================
-# KIE (второй резерв)
-# =========================
+# ================= KIE =================
+
 def ask_kie(message):
     print("🧠 KIE")
 
@@ -163,15 +144,13 @@ def ask_kie(message):
         print("❌ KIE:", e)
         return None
 
-# =========================
-# ОБРАБОТКА СООБЩЕНИЙ
-# =========================
+# ================= HANDLER =================
+
 @dp.message()
 async def handle_message(message: types.Message):
     text = message.text
     user_id = message.from_user.id
 
-    # если не русский → всё равно заставим отвечать на русском
     if not is_russian(text):
         text = f"Ответь на русском: {text}"
 
@@ -184,13 +163,12 @@ async def handle_message(message: types.Message):
         reply = ask_kie(text)
 
     if not reply:
-        reply = "❌ Все AI сейчас недоступны. Попробуй позже."
+        reply = "❌ Все AI сейчас недоступны"
 
     await message.answer(reply)
 
-# =========================
-# HEALTH SERVER
-# =========================
+# ================= HEALTH =================
+
 async def health(request):
     return web.Response(text="OK")
 
@@ -207,16 +185,30 @@ async def start_health_server():
 
     print("🌐 Сервер здоровья запущен")
 
-# =========================
-# MAIN
-# =========================
+# ================= MAIN =================
+
 async def main():
     print("🚀 БОТ ЗАПУЩЕН")
-    print("🧠 OpenRouter | ⚡ Grok | 🧩 KIE")
+
+    # 🛑 анти-дубль Railway
+    run_uid = os.getenv("RAILWAY_RUN_UID")
+    deploy_id = os.getenv("RAILWAY_DEPLOYMENT_ID")
+
+    if run_uid and deploy_id and run_uid != deploy_id:
+        print("⛔ Второй инстанс — выходим")
+        return
 
     await start_health_server()
 
     await bot.delete_webhook(drop_pending_updates=True)
+
+    await asyncio.sleep(2)
+
+    try:
+        await bot.send_message(ADMIN_ID, "✅ Бот перезапущен")
+    except:
+        pass
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
