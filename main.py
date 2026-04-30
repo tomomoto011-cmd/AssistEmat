@@ -26,6 +26,7 @@ dp = Dispatcher()
 user_memory = {}
 user_states = {}
 notes_db = {}
+reminders_db = {}  # ✅ НОВОЕ
 
 # ================= SYSTEM PROMPT =================
 
@@ -154,9 +155,11 @@ async def handle_message(message: types.Message):
         await message.answer("Не совсем тебя понял, уточни 🙏")
         return
 
+    lower = text.lower()
+
     # ================= НАПОМИНАНИЯ =================
 
-    if "напомни" in text.lower():
+    if "напомни" in lower:
         remind_time = parse_time(text)
 
         if not remind_time:
@@ -164,7 +167,16 @@ async def handle_message(message: types.Message):
             await message.answer("Когда напомнить?")
             return
 
+        # сохраняем
+        reminders = reminders_db.get(user_id, [])
+        reminders.append({
+            "text": text,
+            "time": remind_time.strftime("%H:%M %d.%m")
+        })
+        reminders_db[user_id] = reminders
+
         asyncio.create_task(reminder_worker(user_id, text, remind_time))
+
         await message.answer("✅ Напоминание поставил")
         return
 
@@ -174,10 +186,17 @@ async def handle_message(message: types.Message):
         remind_time = parse_time(text)
 
         if not remind_time:
-            await message.answer("Напиши время так: 'через 10 минут' или 'через 1 час'")
+            await message.answer("Напиши: 'через 10 минут' или 'через 1 час'")
             return
 
         original_text = user_states[user_id]["text"]
+
+        reminders = reminders_db.get(user_id, [])
+        reminders.append({
+            "text": original_text,
+            "time": remind_time.strftime("%H:%M %d.%m")
+        })
+        reminders_db[user_id] = reminders
 
         asyncio.create_task(reminder_worker(user_id, original_text, remind_time))
 
@@ -186,9 +205,45 @@ async def handle_message(message: types.Message):
         await message.answer("✅ Напоминание поставил")
         return
 
+    # === показать напоминания ===
+
+    if "покажи напомин" in lower:
+        reminders = reminders_db.get(user_id, [])
+
+        if not reminders:
+            await message.answer("📭 Напоминаний нет")
+            return
+
+        msg = "⏰ Напоминания:\n\n"
+        for i, r in enumerate(reminders, 1):
+            msg += f"{i}. {r['text']} — {r['time']}\n"
+
+        await message.answer(msg)
+        return
+
+    # === удалить напоминание ===
+
+    if "удали напомин" in lower:
+        reminders = reminders_db.get(user_id, [])
+
+        try:
+            num = int(re.findall(r"\d+", text)[0]) - 1
+
+            if 0 <= num < len(reminders):
+                removed = reminders.pop(num)
+                reminders_db[user_id] = reminders
+                await message.answer(f"🗑 Удалил: {removed['text']}")
+            else:
+                await message.answer("Нет такого номера")
+
+        except:
+            await message.answer("Напиши: 'удали напоминание 1'")
+
+        return
+
     # ================= ЗАМЕТКИ =================
 
-    if "запомни" in text.lower() or "запиши" in text.lower():
+    if "запомни" in lower or "запиши" in lower:
         notes = notes_db.get(user_id, [])
         notes.append(text)
         notes_db[user_id] = notes
@@ -196,11 +251,11 @@ async def handle_message(message: types.Message):
         await message.answer("📝 Записал")
         return
 
-    if "покажи заметки" in text.lower():
+    if "покажи заметки" in lower:
         notes = notes_db.get(user_id, [])
 
         if not notes:
-            await message.answer("Пока пусто")
+            await message.answer("📭 Заметок нет")
             return
 
         await message.answer("\n".join(notes))
@@ -244,7 +299,7 @@ async def start_health_server():
 async def main():
     print("🚀 БОТ ЗАПУЩЕН")
 
-    # 🛑 анти-дубль Railway
+    # анти-дубль Railway
     run_uid = os.getenv("RAILWAY_RUN_UID")
     deploy_id = os.getenv("RAILWAY_DEPLOYMENT_ID")
 
