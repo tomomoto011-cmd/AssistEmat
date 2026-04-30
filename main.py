@@ -15,7 +15,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 GROK_KEY = os.getenv("GROK_KEY")
 KIE_KEY = os.getenv("KIE_KEY")
-GEMINI_KEY = os.getenv("GEMINI_KEY")  # 👈 НОВОЕ
+GEMINI_KEY = os.getenv("GEMINI_KEY")
 
 ADMIN_ID = 8590402564
 
@@ -32,7 +32,7 @@ SYSTEM_PROMPT = """
 Ты — живой, дружелюбный AI-ассистент.
 
 Правила:
-- Всегда отвечай на русском языке (если пользователь не попросил иначе)
+- Всегда отвечай на русском языке
 - Пиши естественно, как человек
 - Добавляй лёгкую живость
 - Поддерживай диалог
@@ -46,12 +46,13 @@ SYSTEM_PROMPT = """
 def safe_get_content(data):
     try:
         return data["choices"][0]["message"]["content"]
-    except Exception:
-        print("❌ Неправильный формат:", data)
+    except:
         return None
 
 
 def is_russian(text):
+    if not text:
+        return False
     return any("а" <= c <= "я" or "А" <= c <= "Я" for c in text)
 
 # ================= OPENROUTER =================
@@ -69,7 +70,7 @@ def ask_openrouter(user_id, message):
     messages.append({"role": "user", "content": message})
 
     try:
-        response = requests.post(
+        r = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {OPENROUTER_KEY}",
@@ -83,11 +84,11 @@ def ask_openrouter(user_id, message):
             timeout=15
         )
 
-        if response.status_code != 200:
-            print("❌ OpenRouter:", response.text)
+        if r.status_code != 200:
+            print("❌ OpenRouter:", r.text)
             return None
 
-        data = response.json()
+        data = r.json()
         reply = safe_get_content(data)
 
         if reply:
@@ -110,7 +111,7 @@ def ask_grok(message):
         return None
 
     try:
-        response = requests.post(
+        r = requests.post(
             "https://api.x.ai/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {GROK_KEY}",
@@ -126,11 +127,11 @@ def ask_grok(message):
             timeout=15
         )
 
-        if response.status_code != 200:
-            print("❌ GROK:", response.text)
+        if r.status_code != 200:
+            print("❌ GROK:", r.text)
             return None
 
-        return safe_get_content(response.json())
+        return safe_get_content(r.json())
 
     except Exception as e:
         print("❌ GROK:", e)
@@ -145,7 +146,7 @@ def ask_kie(message):
         return None
 
     try:
-        response = requests.post(
+        r = requests.post(
             "https://api.kie.ai/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {KIE_KEY}",
@@ -161,11 +162,11 @@ def ask_kie(message):
             timeout=15
         )
 
-        if response.status_code != 200:
-            print("❌ KIE:", response.text)
+        if r.status_code != 200:
+            print("❌ KIE:", r.text)
             return None
 
-        return safe_get_content(response.json())
+        return safe_get_content(r.json())
 
     except Exception as e:
         print("❌ KIE:", e)
@@ -180,8 +181,8 @@ def ask_gemini(message):
         return None
 
     try:
-        response = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}",
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_KEY}",
             headers={"Content-Type": "application/json"},
             json={
                 "contents": [
@@ -193,12 +194,11 @@ def ask_gemini(message):
             timeout=15
         )
 
-        if response.status_code != 200:
-            print("❌ GEMINI:", response.text)
+        if r.status_code != 200:
+            print("❌ GEMINI:", r.text)
             return None
 
-        data = response.json()
-
+        data = r.json()
         return data["candidates"][0]["content"]["parts"][0]["text"]
 
     except Exception as e:
@@ -209,6 +209,11 @@ def ask_gemini(message):
 
 @dp.message()
 async def handle_message(message: types.Message):
+
+    if not message.text:
+        await message.answer("Я пока понимаю только текст 🙂")
+        return
+
     text = message.text
     user_id = message.from_user.id
 
@@ -224,7 +229,7 @@ async def handle_message(message: types.Message):
         reply = ask_kie(text)
 
     if not reply:
-        reply = ask_gemini(text)  # 👈 НОВОЕ
+        reply = ask_gemini(text)
 
     if not reply:
         reply = "❌ Все AI сейчас недоступны"
