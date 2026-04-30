@@ -33,14 +33,22 @@ SYSTEM_PROMPT = """
 Правила:
 - Всегда отвечай на русском языке (если пользователь не попросил иначе)
 - Пиши естественно, как человек
-- Не будь сухим, добавляй немного эмоций
+- Добавляй лёгкую живость в ответ
 - Поддерживай диалог
 
 Если не понял:
 → "Не совсем тебя понял, уточни пожалуйста 🙏"
 """
 
-# ================= LANGUAGE =================
+# ================= UTILS =================
+
+def safe_get_content(data):
+    try:
+        return data["choices"][0]["message"]["content"]
+    except Exception:
+        print("❌ Неправильный формат ответа:", data)
+        return None
+
 
 def is_russian(text):
     return any("а" <= c <= "я" or "А" <= c <= "Я" for c in text)
@@ -71,8 +79,15 @@ def ask_openrouter(user_id, message):
             timeout=15
         )
 
+        if response.status_code != 200:
+            print("❌ OpenRouter HTTP:", response.status_code, response.text)
+            return None
+
         data = response.json()
-        reply = data["choices"][0]["message"]["content"]
+        reply = safe_get_content(data)
+
+        if not reply:
+            return None
 
         history.append({"role": "user", "content": message})
         history.append({"role": "assistant", "content": reply})
@@ -107,8 +122,11 @@ def ask_grok(message):
             timeout=15
         )
 
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
+        if response.status_code != 200:
+            print("❌ GROK HTTP:", response.status_code, response.text)
+            return None
+
+        return safe_get_content(response.json())
 
     except Exception as e:
         print("❌ GROK:", e)
@@ -137,8 +155,11 @@ def ask_kie(message):
             timeout=15
         )
 
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
+        if response.status_code != 200:
+            print("❌ KIE HTTP:", response.status_code, response.text)
+            return None
+
+        return safe_get_content(response.json())
 
     except Exception as e:
         print("❌ KIE:", e)
@@ -201,7 +222,6 @@ async def main():
     await start_health_server()
 
     await bot.delete_webhook(drop_pending_updates=True)
-
     await asyncio.sleep(2)
 
     try:
