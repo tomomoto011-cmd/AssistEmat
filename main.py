@@ -1,123 +1,173 @@
 import os
 import asyncio
 import logging
-from aiohttp import web
-import requests
+from datetime import datetime, timedelta
 
-from aiogram import Bot, Dispatcher, types
+from aiohttp import web
+import asyncpg
+
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.context import FSMContext
 
 # ================= CONFIG =================
 
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
-
-ADMIN_ID = 8590402564
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 
-# ================= MEMORY =================
+db = None
 
-user_memory = {}
+# ================= FSM =================
 
-# ================= SYSTEM PROMPT =================
+class ReminderState(StatesGroup):
+    waiting_for_time = State()
 
-SYSTEM_PROMPT = """
-Ты — живой AI-ассистент.
+# ================= DB =================
 
-Сам выбирай стиль:
-- если человек жалуется → эмпатия
-- если вопрос про здоровье → кратко и по делу
-- если обычный диалог → дружелюбно
+async def init_db():
+    global db
+    db = await asyncpg.create_pool(DATABASE_URL)
 
-Отвечай на русском.
-"""
+    async with db.acquire() as conn:
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS reminders (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            text TEXT,
+            remind_at TIMESTAMP
+        );
+        """)
+
+# ================= MENU =================
+
+menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📌 Напоминания")],
+        [KeyboardButton(text="➕ Создать напоминание")]
+    ],
+    resize_keyboard=True
+)
 
 # ================= UTILS =================
 
-def is_russian(text):
-    if not text:
-        return True
-    return any("а" <= c <= "я" or "А" <= c <= "Я" for c in text)
+def parse_time(text):
+    text = text.lower()
 
-def safe_get_content(data):
-    try:
-        return data["choices"][0]["message"]["content"]
-    except Exception:
-        logging.error(f"❌ Неправильный ответ: {data}")
-        return None
+    if "мин" in text:
+        num = int("".join(filter(str.isdigit, text)) or 1)
+        return datetime.now() + timedelta(minutes=num)
 
-# ================= OPENROUTER =================
+    if "час" in text:
+        num = int("".join(filter(str.isdigit, text)) or 1)
+        return datetime.now() + timedelta(hours=num)
 
-def ask_openrouter(user_id, message):
-    logging.info("🧠 OPENROUTER")
+    return None
 
-    history = user_memory.get(user_id, [])
+# ================= SCHEDULER =================
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages += history[-20:]
-    messages.append({"role": "user", "content": message})
+async def scheduler():
+    while True:
+        async with db.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM reminders WHERE remind_at <= NOW()"
+            )
 
-    try:
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "mistralai/mixtral-8x7b-instruct",
-                "messages": messages,
-                "temperature": 0.8
-            },
-            timeout=20
+            for r in rows:
+                try:
+                    await bot.send_message(r["user_id"], f"⏰ {r['text']}")
+                except:
+                    pass
+
+                await conn.execute("DELETE FROM reminders WHERE id=$1", r["id"])
+
+        await asyncio.sleep(5)
+
+# ================= HANDLERS =================
+
+@dp.message(F.text == "/start")
+async def start(message: types.Message):
+    await message.answer("Привет! Я помогу с напоминаниями 👇", reply_markup=menu)
+
+# === создать ===
+
+@dp.message(F.text.contains("напомни") | (F.text == "➕ Создать напоминание"))
+async def create_reminder(message: types.Message, state: FSMContext):
+    await state.update_data(text=message.text)
+    await message.answer("Когда напомнить?")
+    await state.set_state(ReminderState.waiting_for_time)
+
+@dp.message(ReminderState.waiting_for_time)
+async def set_time(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+
+    remind_at = parse_time(message.text)
+
+    if not remind_at:
+        await message.answer("Не понял время. Пример: через 10 минут")
+        return
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO reminders(user_id, text, remind_at) VALUES($1,$2,$3)",
+            message.from_user.id,
+            data["text"],
+            remind_at
         )
 
-        if response.status_code != 200:
-            logging.error(f"❌ OpenRouter HTTP: {response.status_code} {response.text}")
-            return None
+    await message.answer("✅ Напоминание создано")
+    await state.clear()
 
-        data = response.json()
-        reply = safe_get_content(data)
+# === список ===
 
-        if not reply:
-            return None
+@dp.message(F.text == "📌 Напоминания")
+async def list_reminders(message: types.Message):
+    async with db.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM reminders WHERE user_id=$1",
+            message.from_user.id
+        )
 
-        history.append({"role": "user", "content": message})
-        history.append({"role": "assistant", "content": reply})
-        user_memory[user_id] = history[-20:]
+    if not rows:
+        await message.answer("Список пуст")
+        return
 
-        return reply
+    for r in rows:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="❌ Удалить",
+                callback_data=f"del_{r['id']}"
+            )]
+        ])
 
-    except Exception as e:
-        logging.error(f"❌ OpenRouter error: {e}")
-        return None
+        await message.answer(
+            f"{r['text']}\n⏰ {r['remind_at']}",
+            reply_markup=kb
+        )
 
-# ================= HANDLER =================
+# === удаление ===
 
-@dp.message()
-async def handle_message(message: types.Message):
-    text = message.text or ""
-    user_id = message.from_user.id
+@dp.callback_query(F.data.startswith("del_"))
+async def delete_reminder(callback: types.CallbackQuery):
+    rid = int(callback.data.split("_")[1])
 
-    if not is_russian(text):
-        text = f"Ответь на русском: {text}"
+    async with db.acquire() as conn:
+        await conn.execute("DELETE FROM reminders WHERE id=$1", rid)
 
-    reply = ask_openrouter(user_id, text)
-
-    if not reply:
-        reply = "❌ AI временно недоступен"
-
-    await message.answer(reply)
+    await callback.message.edit_text("❌ Удалено")
 
 # ================= HEALTH =================
 
 async def health(request):
     return web.Response(text="OK")
 
-async def start_health_server():
+async def start_health():
     app = web.Application()
     app.router.add_get("/", health)
 
@@ -128,40 +178,27 @@ async def start_health_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
-    logging.info(f"🌐 Health server on {port}")
-
 # ================= MAIN =================
 
 async def main():
     logging.info("🚀 БОТ ЗАПУЩЕН")
 
-    # 🛑 анти-дубль Railway
-    run_uid = os.getenv("RAILWAY_RUN_UID")
-    deploy_id = os.getenv("RAILWAY_DEPLOYMENT_ID")
-
-    if run_uid and deploy_id and run_uid != deploy_id:
-        logging.warning("⛔ Второй инстанс — выходим")
+    # анти-дубль
+    if os.getenv("RAILWAY_RUN_UID") != os.getenv("RAILWAY_DEPLOYMENT_ID"):
+        logging.warning("⛔ второй инстанс")
         return
 
-    await start_health_server()
+    await init_db()
+    await start_health()
 
     await bot.delete_webhook(drop_pending_updates=True)
     await asyncio.sleep(2)
 
-    try:
-        await bot.send_message(ADMIN_ID, "✅ Бот перезапущен")
-    except:
-        pass
+    asyncio.create_task(scheduler())
 
-    # 🔥 ГЛАВНОЕ — не даём процессу умереть
-    polling_task = asyncio.create_task(dp.start_polling(bot))
-
-    await polling_task
+    await dp.start_polling(bot)
 
 # ================= ENTRY =================
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logging.info("❌ Бот остановлен")
+    asyncio.run(main())
