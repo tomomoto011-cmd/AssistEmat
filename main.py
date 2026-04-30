@@ -1,31 +1,50 @@
+import os
 import asyncio
 import logging
-import os
-import re
 from datetime import datetime, timedelta
 
+import httpx
+import asyncpg
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.storage.memory import MemoryStorage
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-import asyncpg
-import httpx
-
+# ---------------- ЛОГИ ----------------
 logging.basicConfig(level=logging.INFO)
 
+# ---------------- ENV ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
 
+# ---------------- АНТИ-ДУБЛЬ ----------------
+if os.getenv("RAILWAY_ENVIRONMENT") == "production":
+    if os.getenv("RAILWAY_REPLICA_ID") not in (None, "0"):
+        logging.warning("⛔ Второй инстанс — выходим")
+        exit()
+
+# ---------------- INIT ----------------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+scheduler = AsyncIOScheduler()
 
-# ================= DB =================
+# ---------------- FSM ----------------
+class Register(StatesGroup):
+    name = State()
+    age = State()
+    gender = State()
+    style = State()
 
+class ReminderFSM(StatesGroup):
+    text = State()
+    time = State()
+
+# ---------------- БД ----------------
 db = None
 
 async def init_db():
@@ -37,10 +56,10 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
             name TEXT,
-            age INT,
+            age TEXT,
             gender TEXT,
             style TEXT
-        );
+        )
         """)
 
         await conn.execute("""
@@ -48,9 +67,8 @@ async def init_db():
             id SERIAL PRIMARY KEY,
             user_id BIGINT,
             text TEXT,
-            category TEXT,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
+            category TEXT
+        )
         """)
 
         await conn.execute("""
@@ -59,222 +77,180 @@ async def init_db():
             user_id BIGINT,
             text TEXT,
             remind_at TIMESTAMP
-        );
+        )
         """)
 
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS memory (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            role TEXT,
-            content TEXT,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        """)
+# ---------------- OPENROUTER ----------------
+async def ask_ai(prompt):
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-# ================= FSM =================
+    data = {
+        "model": "qwen/qwen-2.5-7b-instruct",
+        "messages": [
+            {"role": "system", "content": "Отвечай всегда на русском языке."},
+            {"role": "user", "content": prompt}
+        ]
+    }
 
-class ReminderState(StatesGroup):
-    waiting_time = State()
+    async with httpx.AsyncClient() as client:
+        r = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
+        return r.json()["choices"][0]["message"]["content"]
 
-# ================= UTILS =================
-
-def detect_intent(text: str):
-    text = text.lower()
-
-    if "напомни" in text:
-        return "reminder"
-    if "запиши" in text or "заметка" in text:
-        return "note"
-    if "покажи" in text:
-        return "show"
-
-    return "chat"
-
-def detect_category(text):
-    if "куп" in text:
-        return "покупки"
-    if "наблюд" in text:
-        return "наблюдения"
-    return "общие"
+# ---------------- УТИЛЫ ----------------
+def fix_layout(text):
+    layout = dict(zip(
+        "qwertyuiop[]asdfghjkl;'zxcvbnm,.",
+        "йцукенгшщзхъфывапролджэячсмитьбю"
+    ))
+    return "".join(layout.get(c, c) for c in text.lower())
 
 def detect_mode(text):
     text = text.lower()
-
-    if any(w in text for w in ["болит", "температура", "симптом"]):
+    if any(w in text for w in ["боль", "температура", "болит"]):
         return "doctor"
-
-    if any(w in text for w in ["обидел", "ссора", "чувствую", "переживаю"]):
+    if any(w in text for w in ["обидел", "чувствую", "расстроен"]):
         return "psy"
-
     return "normal"
 
-# ================= AI =================
-
-async def ask_ai(user_id, text, mode):
-    async with db.acquire() as conn:
-        rows = await conn.fetch("""
-        SELECT role, content FROM memory
-        WHERE user_id=$1
-        ORDER BY created_at DESC
-        LIMIT 20
-        """, user_id)
-
-    messages = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
-
-    if mode == "psy":
-        system = "Ты эмпатичный психолог. Максимально бережный."
-    elif mode == "doctor":
-        system = "Ты врач. Кратко и по делу. Без лекарств."
-    else:
-        system = "Ты дружелюбный ассистент."
-
-    messages.insert(0, {"role": "system", "content": system})
-    messages.append({"role": "user", "content": text})
-
-    async with httpx.AsyncClient() as client:
-        try:
-            r = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-                json={"model": "openai/gpt-4o-mini", "messages": messages},
-                timeout=20
-            )
-            data = r.json()
-            answer = data["choices"][0]["message"]["content"]
-        except:
-            answer = "Ошибка AI"
-
-    async with db.acquire() as conn:
-        await conn.execute("INSERT INTO memory (user_id, role, content) VALUES ($1,$2,$3)", user_id, "user", text)
-        await conn.execute("INSERT INTO memory (user_id, role, content) VALUES ($1,$2,$3)", user_id, "assistant", answer)
-
-    return answer
-
-# ================= HANDLERS =================
-
+# ---------------- START ----------------
 @dp.message(CommandStart())
-async def start(msg: Message):
-    await msg.answer("Привет. Я тебя запомню 🙂 Напиши что-нибудь.")
+async def start(message: Message, state: FSMContext):
+    user = await db.fetchrow("SELECT * FROM users WHERE user_id=$1", message.from_user.id)
 
-# -------- REMINDER --------
-
-@dp.message(F.text)
-async def handle(msg: Message, state: FSMContext):
-    text = msg.text
-    user_id = msg.from_user.id
-
-    intent = detect_intent(text)
-
-    # ===== НАПОМИНАНИЕ =====
-    if intent == "reminder":
-        await state.update_data(reminder_text=text)
-        await msg.answer("Когда напомнить?")
-        await state.set_state(ReminderState.waiting_time)
+    if user:
+        await message.answer(f"С возвращением, {user['name']} 👋")
         return
 
-    # ===== ПОКАЗАТЬ =====
-    if "напомин" in text.lower():
-        async with db.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM reminders WHERE user_id=$1", user_id)
+    await message.answer("Привет! Как тебя зовут?")
+    await state.set_state(Register.name)
 
-        if not rows:
-            await msg.answer("Нет напоминаний")
-            return
+# ---------------- РЕГИСТРАЦИЯ ----------------
+@dp.message(Register.name)
+async def reg_name(message: Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await message.answer("Возраст?")
+    await state.set_state(Register.age)
 
-        kb = []
-        text_out = ""
+@dp.message(Register.age)
+async def reg_age(message: Message, state: FSMContext):
+    await state.update_data(age=message.text)
+    await message.answer("Пол?")
+    await state.set_state(Register.gender)
 
-        for r in rows:
-            text_out += f"{r['text']} — {r['remind_at']}\n"
-            kb.append([InlineKeyboardButton(
-                text="❌ удалить",
-                callback_data=f"del_rem_{r['id']}"
-            )])
+@dp.message(Register.gender)
+async def reg_gender(message: Message, state: FSMContext):
+    await state.update_data(gender=message.text)
 
-        await msg.answer(text_out, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Друг", callback_data="style_friend")],
+        [InlineKeyboardButton(text="Советник", callback_data="style_advisor")]
+    ])
 
-    # ===== ЗАМЕТКА =====
-    if intent == "note":
-        category = detect_category(text)
+    await message.answer("Стиль общения?", reply_markup=kb)
 
-        async with db.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO notes (user_id,text,category) VALUES ($1,$2,$3)",
-                user_id, text, category
-            )
-
-        await msg.answer(f"✅ Сохранил в {category}")
-        return
-
-    # ===== AI =====
-    mode = detect_mode(text)
-    answer = await ask_ai(user_id, text, mode)
-    await msg.answer(answer)
-
-# -------- FSM TIME --------
-
-@dp.message(ReminderState.waiting_time)
-async def set_time(msg: Message, state: FSMContext):
-    user_id = msg.from_user.id
+@dp.callback_query(F.data.startswith("style_"))
+async def reg_style(call: CallbackQuery, state: FSMContext):
+    style = call.data.split("_")[1]
     data = await state.get_data()
-    text = data["reminder_text"]
-
-    # простая логика
-    if "час" in msg.text:
-        remind_at = datetime.now() + timedelta(hours=1)
-    else:
-        remind_at = datetime.now() + timedelta(minutes=1)
 
     async with db.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO reminders (user_id,text,remind_at) VALUES ($1,$2,$3)",
-            user_id, text, remind_at
-        )
+        await conn.execute("""
+        INSERT INTO users (user_id, name, age, gender, style)
+        VALUES ($1,$2,$3,$4,$5)
+        """, call.from_user.id, data["name"], data["age"], data["gender"], style)
 
-    await msg.answer("⏰ Напоминание создано")
+    await call.message.answer("Готово! Теперь можем общаться 🙂")
     await state.clear()
 
-# -------- DELETE --------
+# ---------------- НАПОМИНАНИЯ ----------------
+@dp.message(F.text.contains("напомни"))
+async def reminder_start(message: Message, state: FSMContext):
+    await state.update_data(text=message.text)
+    await message.answer("Когда напомнить?")
+    await state.set_state(ReminderFSM.time)
 
-@dp.callback_query(F.data.startswith("del_rem_"))
-async def delete_rem(cb: CallbackQuery):
-    rid = int(cb.data.split("_")[-1])
+@dp.message(ReminderFSM.time)
+async def reminder_set(message: Message, state: FSMContext):
+    text = (await state.get_data())["text"]
+
+    remind_at = datetime.now() + timedelta(minutes=1)
 
     async with db.acquire() as conn:
-        await conn.execute("DELETE FROM reminders WHERE id=$1", rid)
+        rid = await conn.fetchval("""
+        INSERT INTO reminders (user_id, text, remind_at)
+        VALUES ($1,$2,$3) RETURNING id
+        """, message.from_user.id, text, remind_at)
 
-    await cb.message.edit_text("Удалено")
+    scheduler.add_job(send_reminder, "date", run_date=remind_at,
+                      args=[message.chat.id, text])
 
-# ================= SCHEDULER =================
+    await message.answer("Напоминание создано ✅")
+    await state.clear()
 
-async def scheduler():
-    while True:
-        await asyncio.sleep(10)
+async def send_reminder(chat_id, text):
+    await bot.send_message(chat_id, f"⏰ Напоминание: {text}")
 
-        async with db.acquire() as conn:
-            rows = await conn.fetch("""
-            SELECT * FROM reminders
-            WHERE remind_at <= NOW()
-            """)
+# ---------------- ЗАМЕТКИ ----------------
+@dp.message(F.text.contains("запомни") | F.text.contains("запиши"))
+async def save_note(message: Message):
+    text = message.text
 
-            for r in rows:
-                await bot.send_message(r["user_id"], f"⏰ Напоминание: {r['text']}")
-                await conn.execute("DELETE FROM reminders WHERE id=$1", r["id"])
+    async with db.acquire() as conn:
+        await conn.execute("""
+        INSERT INTO notes (user_id, text, category)
+        VALUES ($1,$2,$3)
+        """, message.from_user.id, text, "общие")
 
-# ================= MAIN =================
+    await message.answer("Заметка сохранена 📌")
 
+@dp.message(F.text.contains("покажи заметки"))
+async def show_notes(message: Message):
+    async with db.acquire() as conn:
+        notes = await conn.fetch("SELECT * FROM notes WHERE user_id=$1", message.from_user.id)
+
+    if not notes:
+        await message.answer("Нет заметок")
+        return
+
+    for n in notes:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Удалить", callback_data=f"del_{n['id']}")]
+        ])
+        await message.answer(n["text"], reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("del_"))
+async def delete_note(call: CallbackQuery):
+    nid = int(call.data.split("_")[1])
+
+    async with db.acquire() as conn:
+        await conn.execute("DELETE FROM notes WHERE id=$1", nid)
+
+    await call.message.edit_text("Удалено ❌")
+
+# ---------------- AI ----------------
+@dp.message()
+async def ai_handler(message: Message):
+    text = fix_layout(message.text)
+
+    mode = detect_mode(text)
+
+    if mode == "psy":
+        prompt = f"Отвечай максимально эмпатично: {text}"
+    elif mode == "doctor":
+        prompt = f"Отвечай как врач, сухо и по делу: {text}"
+    else:
+        prompt = text
+
+    answer = await ask_ai(prompt)
+    await message.answer(answer)
+
+# ---------------- MAIN ----------------
 async def main():
-    # анти-дубль
-    if os.getenv("RAILWAY_ENVIRONMENT") == "production":
-        if os.getenv("RAILWAY_REPLICA_ID") not in (None, "0"):
-            logging.warning("⛔ Второй инстанс — выходим")
-            return
-
     await init_db()
-
-    asyncio.create_task(scheduler())
+    scheduler.start()
 
     logging.info("🚀 БОТ ЗАПУЩЕН")
     await dp.start_polling(bot)
