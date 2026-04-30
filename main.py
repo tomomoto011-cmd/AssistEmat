@@ -10,7 +10,6 @@ import asyncpg
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import CommandStart
 
 # ================= CONFIG =================
 
@@ -27,45 +26,53 @@ dp = Dispatcher()
 
 db = None
 
-# ================= KEYBOARD =================
+# ================= STATE =================
 
-def delete_kb(item_id, item_type):
+user_states = {}
+
+# ================= KEYBOARDS =================
+
+def style_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del:{item_type}:{item_id}")]
+        [InlineKeyboardButton(text="🤝 Друг", callback_data="style:друг")],
+        [InlineKeyboardButton(text="💬 Подруга", callback_data="style:подруга")],
+        [InlineKeyboardButton(text="🧠 Советник", callback_data="style:советник")],
+        [InlineKeyboardButton(text="📋 Секретарь", callback_data="style:секретарь")],
+        [InlineKeyboardButton(text="🔥 Всё сразу", callback_data="style:all")]
     ])
 
-# ================= LAYOUT FIX =================
+def gender_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👨 Мужской", callback_data="gender:муж")],
+        [InlineKeyboardButton(text="👩 Женский", callback_data="gender:жен")]
+    ])
+
+def delete_kb(item_id, typ):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del:{typ}:{item_id}")]
+    ])
+
+# ================= UTILS =================
 
 def fix_layout(text):
     layout = dict(zip(
         "qwertyuiop[]asdfghjkl;'zxcvbnm,.",
         "йцукенгшщзхъфывапролджэячсмитьбю"
     ))
-
-    fixed = "".join(layout.get(c, c) for c in text.lower())
-    return fixed
-
-# ================= TIME =================
+    return "".join(layout.get(c, c) for c in text.lower())
 
 def parse_time(text):
-    text = text.lower()
-
     try:
         if "через" in text:
             num = int(re.findall(r"\d+", text)[0])
-
             if "минут" in text:
                 return datetime.now() + timedelta(minutes=num)
-
             if "час" in text:
                 return datetime.now() + timedelta(hours=num)
-
         if "завтра" in text:
             return datetime.now() + timedelta(days=1)
-
     except:
         return None
-
     return None
 
 # ================= DB =================
@@ -75,6 +82,16 @@ async def init_db():
     db = await asyncpg.create_pool(DATABASE_URL)
 
     async with db.acquire() as conn:
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            name TEXT,
+            age INT,
+            gender TEXT,
+            style TEXT
+        );
+        """)
+
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS notes (
             id SERIAL PRIMARY KEY,
@@ -93,26 +110,66 @@ async def init_db():
         );
         """)
 
+async def get_user(user_id):
+    async with db.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
+
 # ================= REMINDER =================
 
 async def reminder_worker(user_id, text, remind_time):
     wait = (remind_time - datetime.now()).total_seconds()
-
     if wait > 0:
         await asyncio.sleep(wait)
-
     await bot.send_message(user_id, f"⏰ Напоминание: {text}")
 
 # ================= AI =================
 
-def ask_openrouter(message):
+def detect_mode(text):
+    t = text.lower()
+
+    psycho = ["обид", "чувств", "плохо", "ссора", "переживаю", "тревог", "груст"]
+    health = ["болит", "температур", "кашель", "голова", "живот", "симптом"]
+
+    if any(w in t for w in psycho):
+        return "psycho"
+    if any(w in t for w in health):
+        return "doctor"
+    return "normal"
+
+def build_prompt(user, mode, text):
+    base = f"Ты общаешься с пользователем по имени {user['name']}. Обращайся на ты."
+
+    style = user["style"]
+
+    if style == "друг":
+        base += " Ты как близкий друг."
+    elif style == "подруга":
+        base += " Ты как тёплая подруга."
+    elif style == "советник":
+        base += " Ты как рациональный советник."
+    elif style == "секретарь":
+        base += " Ты краткий и по делу."
+    else:
+        base += " Комбинируй стиль общения."
+
+    if mode == "psycho":
+        base += " Максимальная эмпатия, поддержка, мягкость."
+    elif mode == "doctor":
+        base += " Отвечай как врач: чётко, спокойно, без назначения лекарств."
+    else:
+        base += " Обычное дружелюбное общение."
+
+    return base + f"\n\nСообщение: {text}"
+
+def ask_openrouter(prompt):
     try:
         r = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={"Authorization": f"Bearer {OPENROUTER_KEY}"},
             json={
                 "model": "mistralai/mixtral-8x7b-instruct",
-                "messages": [{"role": "user", "content": message}]
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.8
             },
             timeout=15
         )
@@ -120,12 +177,77 @@ def ask_openrouter(message):
     except:
         return None
 
-# ================= HANDLER =================
+# ================= REGISTRATION =================
+
+@dp.message(F.text == "/start")
+async def start(message: types.Message):
+    user = await get_user(message.from_user.id)
+
+    if user:
+        await message.answer(f"С возвращением, {user['name']} 👋")
+        return
+
+    user_states[message.from_user.id] = {"step": "name"}
+    await message.answer("Как тебя зовут?")
+
+@dp.callback_query(F.data.startswith("gender:"))
+async def gender_select(cb: types.CallbackQuery):
+    user_states[cb.from_user.id]["gender"] = cb.data.split(":")[1]
+    user_states[cb.from_user.id]["step"] = "age"
+    await cb.message.answer("Сколько тебе лет?")
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("style:"))
+async def style_select(cb: types.CallbackQuery):
+    data = user_states[cb.from_user.id]
+    style = cb.data.split(":")[1]
+
+    async with db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO users(user_id,name,age,gender,style) VALUES($1,$2,$3,$4,$5)",
+            cb.from_user.id,
+            data["name"],
+            data["age"],
+            data["gender"],
+            style
+        )
+
+    user_states.pop(cb.from_user.id)
+
+    await cb.message.answer("✅ Готово, давай общаться 😎")
+    await cb.answer()
+
+# ================= MAIN HANDLER =================
 
 @dp.message()
 async def handle(message: types.Message):
     text = message.text or ""
     user_id = message.from_user.id
+
+    # регистрация шаги
+    if user_id in user_states:
+        state = user_states[user_id]
+
+        if state["step"] == "name":
+            state["name"] = text
+            state["step"] = "gender"
+            await message.answer("Выбери пол:", reply_markup=gender_kb())
+            return
+
+        if state["step"] == "age":
+            try:
+                state["age"] = int(text)
+                state["step"] = "style"
+                await message.answer("Выбери стиль общения:", reply_markup=style_kb())
+            except:
+                await message.answer("Напиши возраст числом")
+            return
+
+    user = await get_user(user_id)
+
+    if not user:
+        await message.answer("Напиши /start")
+        return
 
     text = fix_layout(text)
     lower = text.lower()
@@ -134,7 +256,6 @@ async def handle(message: types.Message):
 
     if "напомни" in lower:
         t = parse_time(text)
-
         if not t:
             await message.answer("Когда напомнить?")
             return
@@ -147,7 +268,7 @@ async def handle(message: types.Message):
 
         asyncio.create_task(reminder_worker(user_id, text, t))
 
-        await message.answer("✅ Напоминание создано", reply_markup=delete_kb(rec["id"], "reminder"))
+        await message.answer("Ок, напомню 👍", reply_markup=delete_kb(rec["id"], "reminder"))
         return
 
     if "покажи напомин" in lower:
@@ -155,33 +276,29 @@ async def handle(message: types.Message):
             rows = await conn.fetch("SELECT * FROM reminders WHERE user_id=$1", user_id)
 
         if not rows:
-            await message.answer("📭 Нет напоминаний")
+            await message.answer("Пусто")
             return
 
         for r in rows:
-            await message.answer(
-                f"{r['text']} — {r['remind_time']}",
-                reply_markup=delete_kb(r["id"], "reminder")
-            )
+            await message.answer(f"{r['text']}", reply_markup=delete_kb(r["id"], "reminder"))
         return
 
     # ================= ЗАМЕТКИ =================
 
     if "запомни" in lower or "запиши" in lower:
-
-        category = "обычное"
+        cat = "обычное"
         if "куп" in lower:
-            category = "покупки"
+            cat = "покупки"
         if "наблюд" in lower:
-            category = "наблюдения"
+            cat = "наблюдения"
 
         async with db.acquire() as conn:
             rec = await conn.fetchrow(
                 "INSERT INTO notes(user_id,text,category) VALUES($1,$2,$3) RETURNING id",
-                user_id, text, category
+                user_id, text, cat
             )
 
-        await message.answer(f"📝 Сохранил ({category})", reply_markup=delete_kb(rec["id"], "note"))
+        await message.answer(f"Сохранил ({cat})", reply_markup=delete_kb(rec["id"], "note"))
         return
 
     if "покажи заметки" in lower:
@@ -189,26 +306,26 @@ async def handle(message: types.Message):
             rows = await conn.fetch("SELECT * FROM notes WHERE user_id=$1", user_id)
 
         if not rows:
-            await message.answer("📭 Нет заметок")
+            await message.answer("Нет заметок")
             return
 
         for r in rows:
-            await message.answer(
-                f"[{r['category']}] {r['text']}",
-                reply_markup=delete_kb(r["id"], "note")
-            )
+            await message.answer(f"[{r['category']}] {r['text']}", reply_markup=delete_kb(r["id"], "note"))
         return
 
     # ================= AI =================
 
-    reply = ask_openrouter(text) or "Не совсем понял, уточни 🙏"
+    mode = detect_mode(text)
+    prompt = build_prompt(user, mode, text)
+
+    reply = ask_openrouter(prompt) or "Не совсем понял, уточни 🙏"
     await message.answer(reply)
 
-# ================= CALLBACK =================
+# ================= DELETE =================
 
 @dp.callback_query(F.data.startswith("del:"))
-async def delete_item(callback: types.CallbackQuery):
-    _, typ, item_id = callback.data.split(":")
+async def delete(cb: types.CallbackQuery):
+    _, typ, item_id = cb.data.split(":")
     item_id = int(item_id)
 
     async with db.acquire() as conn:
@@ -217,8 +334,8 @@ async def delete_item(callback: types.CallbackQuery):
         if typ == "reminder":
             await conn.execute("DELETE FROM reminders WHERE id=$1", item_id)
 
-    await callback.message.edit_text("🗑 Удалено")
-    await callback.answer()
+    await cb.message.edit_text("Удалено")
+    await cb.answer()
 
 # ================= HEALTH =================
 
