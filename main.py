@@ -31,9 +31,12 @@ scheduler = AsyncIOScheduler()
 # 🛑 АНТИ-ДУБЛЬ
 # ======================
 if os.getenv("RAILWAY_ENVIRONMENT") == "production":
-    if os.getenv("RAILWAY_REPLICA_ID") not in (None, "0"):
-        print("⛔ Второй инстанс — выходим")
-        exit()
+    replica = os.getenv("RAILWAY_REPLICA_ID")
+    if replica and replica != "0":
+        logging.warning(f"⛔ Реплика {replica} остановлена")
+        import time
+        while True:
+            time.sleep(1000)
 
 # ======================
 # БАЗА
@@ -88,9 +91,6 @@ async def init_db():
 # ======================
 class Register(StatesGroup):
     name = State()
-    age = State()
-    gender = State()
-    style = State()
 
 class ReminderFSM(StatesGroup):
     text = State()
@@ -149,26 +149,24 @@ async def get_mood(user_id):
         return row[0] if row else "нейтральное"
 
 # ======================
-# AI + fallback
+# AI
 # ======================
 async def ask_ai(user_id, text, user):
     context = await get_memory(user_id)
     mood = await get_mood(user_id)
 
     system_prompt = f"""
-Ты ассистент.
 Имя: {user['name']}
 Стиль: {user['style']}
-Настроение пользователя: {mood}
+Настроение: {mood}
 
-Всегда отвечай на русском.
+Отвечай на русском.
 """
 
     messages = [{"role": "system", "content": system_prompt}] + context + [
         {"role": "user", "content": text}
     ]
 
-    # OpenRouter
     try:
         async with httpx.AsyncClient() as client:
             r = await client.post(
@@ -178,23 +176,89 @@ async def ask_ai(user_id, text, user):
                 timeout=15
             )
             return r.json()["choices"][0]["message"]["content"]
-    except Exception as e:
-        print("❌ OpenRouter:", e)
+    except:
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
+                    headers={"Authorization": f"Bearer {QWEN_API_KEY}"},
+                    json={"input": {"messages": messages}},
+                    timeout=15
+                )
+                return r.json()["output"]["text"]
+        except:
+            return "❌ AI недоступен"
 
-    # Qwen fallback
+# ======================
+# НАПОМИНАНИЯ
+# ======================
+async def send_reminder(user_id, text):
+    await bot.send_message(user_id, f"⏰ Напоминание: {text}")
+
+async def load_reminders():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT user_id, text, remind_at FROM reminders")
+        rows = await cur.fetchall()
+
+    for r in rows:
+        dt = datetime.fromisoformat(r[2])
+        scheduler.add_job(send_reminder, "date", run_date=dt, args=[r[0], r[1]])
+
+@dp.message(F.text.lower().contains("напомни"))
+async def reminder_start(message: Message, state: FSMContext):
+    await state.set_state(ReminderFSM.text)
+    await state.update_data(text=message.text)
+    await message.answer("Когда? (пример: 2026-05-01 18:00)")
+
+@dp.message(ReminderFSM.text)
+async def reminder_time(message: Message, state: FSMContext):
+    data = await state.get_data()
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
-                headers={"Authorization": f"Bearer {QWEN_API_KEY}"},
-                json={"input": {"messages": messages}},
-                timeout=15
-            )
-            return r.json()["output"]["text"]
-    except Exception as e:
-        print("❌ Qwen:", e)
+        dt = datetime.fromisoformat(message.text)
+    except:
+        await message.answer("Неверный формат")
+        return
 
-    return "❌ AI недоступен"
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO reminders(user_id, text, remind_at) VALUES (?, ?, ?)",
+            (message.from_user.id, data["text"], dt.isoformat())
+        )
+        await db.commit()
+
+    scheduler.add_job(send_reminder, "date", run_date=dt,
+                      args=[message.from_user.id, data["text"]])
+
+    await message.answer("⏰ Готово")
+    await state.clear()
+
+# ======================
+# ЗАМЕТКИ
+# ======================
+@dp.message(F.text.lower().contains("запомни"))
+async def add_note(message: Message):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO notes(user_id, text, category) VALUES (?, ?, ?)",
+            (message.from_user.id, message.text, "общие")
+        )
+        await db.commit()
+
+    await message.answer("📌 Сохранил")
+
+# ======================
+# ПРИВЫЧКИ
+# ======================
+@dp.message(F.text.lower().contains("привычка"))
+async def add_habit(message: Message):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO habits(user_id, name) VALUES (?, ?)",
+            (message.from_user.id, message.text)
+        )
+        await db.commit()
+
+    await message.answer("💪 Добавил привычку")
 
 # ======================
 # МЕНЮ
@@ -207,97 +271,11 @@ def menu():
     ])
 
 # ======================
-# ЗАМЕТКИ CRUD
+# СТАРТ
 # ======================
-@dp.callback_query(F.data == "notes")
-async def show_notes(call: CallbackQuery):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT id, text FROM notes WHERE user_id=?", (call.from_user.id,))
-        rows = await cur.fetchall()
-
-    if not rows:
-        await call.message.answer("Нет заметок")
-        return
-
-    for n in rows:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Удалить", callback_data=f"del_note_{n[0]}")]
-        ])
-        await call.message.answer(n[1], reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("del_note_"))
-async def delete_note(call: CallbackQuery):
-    note_id = int(call.data.split("_")[2])
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM notes WHERE id=?", (note_id,))
-        await db.commit()
-    await call.message.edit_text("Удалено")
-
-# ======================
-# НАПОМИНАНИЯ CRUD
-# ======================
-@dp.callback_query(F.data == "reminders")
-async def show_reminders(call: CallbackQuery):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT id, text, remind_at FROM reminders WHERE user_id=?", (call.from_user.id,))
-        rows = await cur.fetchall()
-
-    for r in rows:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Удалить", callback_data=f"del_rem_{r[0]}")]
-        ])
-        await call.message.answer(f"{r[1]} ({r[2]})", reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("del_rem_"))
-async def delete_rem(call: CallbackQuery):
-    rid = int(call.data.split("_")[2])
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM reminders WHERE id=?", (rid,))
-        await db.commit()
-    await call.message.edit_text("Удалено")
-
-# ======================
-# ПРИВЫЧКИ CRUD
-# ======================
-@dp.callback_query(F.data == "habits")
-async def show_habits(call: CallbackQuery):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT id, name, done FROM habits WHERE user_id=?", (call.from_user.id,))
-        rows = await cur.fetchall()
-
-    for h in rows:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✔️ Сделал", callback_data=f"done_{h[0]}")]
-        ])
-        await call.message.answer(f"{h[1]} | {'✔' if h[2] else '❌'}", reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("done_"))
-async def done_habit(call: CallbackQuery):
-    hid = int(call.data.split("_")[1])
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE habits SET done=1 WHERE id=?", (hid,))
-        await db.commit()
-    await call.message.edit_text("Готово ✔️")
-
-# ======================
-# ГОЛОС (реальный)
-# ======================
-@dp.message(F.voice)
-async def voice_handler(message: Message):
-    file = await bot.get_file(message.voice.file_id)
-    url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-
-    async with httpx.AsyncClient() as client:
-        audio = await client.get(url)
-
-        r = await client.post(
-            "https://openrouter.ai/api/v1/audio/transcriptions",
-            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-            files={"file": ("voice.ogg", audio.content)}
-        )
-        text = r.json().get("text", "")
-
-    await message.answer(f"🎤 {text}")
+@dp.message(CommandStart())
+async def start(message: Message):
+    await message.answer("Привет 👋", reply_markup=menu())
 
 # ======================
 # ЧАТ
@@ -307,20 +285,14 @@ async def chat(message: Message):
     try:
         text = fix_layout(message.text)
 
-        async with aiosqlite.connect(DB_PATH) as db:
-            cur = await db.execute("SELECT * FROM users WHERE user_id=?", (message.from_user.id,))
-            user = await cur.fetchone()
-
-        if not user:
-            await message.answer("Напиши /start")
-            return
-
-        user_dict = {"name": user[1], "style": user[4]}
-
-        await update_emotion(message.from_user.id, text)
         await save_memory(message.from_user.id, "user", text)
+        await update_emotion(message.from_user.id, text)
 
-        answer = await ask_ai(message.from_user.id, text, user_dict)
+        answer = await ask_ai(
+            message.from_user.id,
+            text,
+            {"name": "друг", "style": "friend"}
+        )
 
         await save_memory(message.from_user.id, "assistant", answer)
 
@@ -328,14 +300,7 @@ async def chat(message: Message):
 
     except Exception as e:
         print("❌ CHAT ERROR:", e)
-        await message.answer("Ошибка, попробуй ещё раз")
-
-# ======================
-# START
-# ======================
-@dp.message(CommandStart())
-async def start(message: Message, state: FSMContext):
-    await message.answer("Привет 👋", reply_markup=menu())
+        await message.answer("Ошибка")
 
 # ======================
 # MAIN
