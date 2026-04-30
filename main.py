@@ -11,7 +11,10 @@ from aiogram import Bot, Dispatcher, types
 logging.basicConfig(level=logging.INFO)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
+
+OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY")
+GROK_KEY = os.getenv("GROK_API_KEY")
+KIE_KEY = os.getenv("KIE_API_KEY")
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 
 ADMIN_ID = 8590402564
@@ -29,9 +32,9 @@ SYSTEM_PROMPT = """
 Ты — живой, дружелюбный AI-ассистент.
 
 Правила:
-- Всегда отвечай на русском языке (если пользователь не попросил иначе)
-- Пиши естественно, как человек
-- Добавляй лёгкую живость в ответ
+- Всегда отвечай на русском языке
+- Пиши как человек
+- Добавляй лёгкую эмоцию
 - Поддерживай диалог
 
 Если не понял:
@@ -40,27 +43,26 @@ SYSTEM_PROMPT = """
 
 # ================= UTILS =================
 
+def safe_get_content(data):
+    try:
+        return data["choices"][0]["message"]["content"]
+    except:
+        print("❌ Неправильный формат:", data)
+        return None
+
+
 def is_russian(text):
     if not text:
         return False
     return any("а" <= c <= "я" or "А" <= c <= "Я" for c in text)
 
-
-def safe_get_content(data):
-    try:
-        return data["choices"][0]["message"]["content"]
-    except Exception:
-        print("❌ Неправильный формат ответа:", data)
-        return None
-
 # ================= OPENROUTER =================
 
 def ask_openrouter(user_id, message):
-    print("🧠 OPENROUTER")
-
     if not OPENROUTER_KEY:
-        print("❌ OPENROUTER_KEY отсутствует")
         return None
+
+    print("🧠 OPENROUTER")
 
     history = user_memory.get(user_id, [])
 
@@ -78,13 +80,13 @@ def ask_openrouter(user_id, message):
             json={
                 "model": "mistralai/mixtral-8x7b-instruct",
                 "messages": messages,
-                "temperature": 0.85
+                "temperature": 0.8
             },
-            timeout=20
+            timeout=15
         )
 
         if response.status_code != 200:
-            print("❌ OpenRouter HTTP:", response.status_code, response.text)
+            print("❌ OpenRouter:", response.text)
             return None
 
         data = response.json()
@@ -100,73 +102,133 @@ def ask_openrouter(user_id, message):
         return reply
 
     except Exception as e:
-        print("❌ OpenRouter:", e)
+        print("❌ OpenRouter EX:", e)
+        return None
+
+# ================= GROK =================
+
+def ask_grok(message):
+    if not GROK_KEY:
+        return None
+
+    print("🧠 GROK")
+
+    try:
+        response = requests.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROK_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "grok-1",
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": message}
+                ]
+            },
+            timeout=15
+        )
+
+        if response.status_code != 200:
+            print("❌ GROK:", response.text)
+            return None
+
+        return safe_get_content(response.json())
+
+    except Exception as e:
+        print("❌ GROK EX:", e)
+        return None
+
+# ================= KIE =================
+
+def ask_kie(message):
+    if not KIE_KEY:
+        return None
+
+    print("🧠 KIE")
+
+    try:
+        response = requests.post(
+            "https://api.kie.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {KIE_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": message}
+                ]
+            },
+            timeout=15
+        )
+
+        if response.status_code != 200:
+            print("❌ KIE:", response.text)
+            return None
+
+        return safe_get_content(response.json())
+
+    except Exception as e:
+        print("❌ KIE EX:", e)
         return None
 
 # ================= GEMINI =================
 
 def ask_gemini(message):
-    print("🧠 GEMINI")
-
     if not GEMINI_KEY:
-        print("❌ GEMINI_KEY отсутствует")
         return None
 
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    print("🧠 GEMINI")
 
+    try:
         response = requests.post(
-            url,
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_KEY}",
             headers={"Content-Type": "application/json"},
             json={
                 "contents": [
                     {
                         "parts": [
-                            {"text": SYSTEM_PROMPT},
-                            {"text": message}
+                            {"text": SYSTEM_PROMPT + "\n\n" + message}
                         ]
                     }
                 ]
             },
-            timeout=20
+            timeout=15
         )
 
         if response.status_code != 200:
-            print("❌ GEMINI HTTP:", response.status_code, response.text)
+            print("❌ GEMINI:", response.text)
             return None
 
         data = response.json()
-
         return data["candidates"][0]["content"]["parts"][0]["text"]
 
     except Exception as e:
-        print("❌ GEMINI:", e)
+        print("❌ GEMINI EX:", e)
         return None
 
 # ================= HANDLER =================
 
 @dp.message()
 async def handle_message(message: types.Message):
-
-    if not message.text:
-        await message.answer("Я пока понимаю только текст 🙂")
-        return
-
-    text = message.text
+    text = message.text or ""
     user_id = message.from_user.id
 
     if not is_russian(text):
         text = f"Ответь на русском: {text}"
 
-    # 1. основной AI
-    reply = ask_openrouter(user_id, text)
+    reply = (
+        ask_openrouter(user_id, text)
+        or ask_grok(text)
+        or ask_kie(text)
+        or ask_gemini(text)
+    )
 
-    # 2. fallback
     if not reply:
-        reply = ask_gemini(text)
-
-    if not reply:
-        reply = "⚠️ AI временно недоступен, попробуй позже"
+        reply = "❌ Все AI сейчас недоступны"
 
     await message.answer(reply)
 
@@ -193,7 +255,7 @@ async def start_health_server():
 async def main():
     print("🚀 БОТ ЗАПУЩЕН")
 
-    # 🛑 анти-дубль Railway
+    # анти-дубль
     run_uid = os.getenv("RAILWAY_RUN_UID")
     deploy_id = os.getenv("RAILWAY_DEPLOYMENT_ID")
 
@@ -206,15 +268,12 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     await asyncio.sleep(2)
 
-    # 🔔 баннер при старте
     try:
-        await bot.send_message(ADMIN_ID, "✅ Бот перезапущен и работает")
-    except Exception as e:
-        print("❌ Не удалось отправить баннер:", e)
+        await bot.send_message(ADMIN_ID, "✅ Бот перезапущен")
+    except:
+        pass
 
     await dp.start_polling(bot)
-
-# ================= START =================
 
 if __name__ == "__main__":
     asyncio.run(main())
