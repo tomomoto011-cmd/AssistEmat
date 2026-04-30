@@ -1,7 +1,9 @@
 import os
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta
+
 from aiohttp import web
 import requests
 
@@ -19,37 +21,25 @@ ADMIN_ID = 8590402564
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ================= STORAGE =================
+# ================= MEMORY =================
 
 user_memory = {}
-notes = {}
-reminders = {}
+user_states = {}
+notes_db = {}
 
-# ================= SYSTEM =================
+# ================= SYSTEM PROMPT =================
 
-BASE_SYSTEM = """
-Ты — живой ассистент.
+SYSTEM_PROMPT = """
+Ты — живой, дружелюбный AI-ассистент.
 
 Правила:
-- Всегда отвечай на русском
+- Всегда отвечай на русском языке
 - Пиши естественно
-- Без "я как AI"
+- Добавляй лёгкую живость
+- Поддерживай диалог
 
 Если не понял:
 → "Не совсем тебя понял, уточни пожалуйста 🙏"
-"""
-
-PSYCHO_MODE = """
-Ты эмпатичный психолог.
-Максимально бережный, поддерживающий.
-Помогаешь разобраться в чувствах.
-"""
-
-HEALTH_MODE = """
-Ты спокойный врач.
-Говоришь чётко и по делу.
-НЕ назначаешь лекарства.
-Даёшь безопасные рекомендации.
 """
 
 # ================= UTILS =================
@@ -59,77 +49,61 @@ def is_russian(text):
         return False
     return any("а" <= c <= "я" or "А" <= c <= "Я" for c in text)
 
-def safe_get(data):
+
+def safe_get_content(data):
     try:
         return data["choices"][0]["message"]["content"]
-    except:
-        print("❌ формат ответа:", data)
+    except Exception:
+        print("❌ Неправильный формат ответа:", data)
         return None
 
-# ================= DETECT =================
 
-def detect_intent(text):
-    t = text.lower()
+# ================= TIME PARSER =================
 
-    if "напомни" in t:
-        return "reminder"
+def parse_time(text):
+    text = text.lower()
 
-    if "запомни" in t or "запиши" in t:
-        return "note"
+    try:
+        if "через" in text:
+            num = int(re.findall(r"\d+", text)[0])
 
-    if "покажи" in t and "напомин" in t:
-        return "show_reminders"
+            if "минут" in text:
+                return datetime.now() + timedelta(minutes=num)
 
-    if "покажи" in t and "замет" in t:
-        return "show_notes"
+            if "час" in text:
+                return datetime.now() + timedelta(hours=num)
 
-    if "удали" in t:
-        return "delete"
+        if "завтра" in text:
+            return datetime.now() + timedelta(days=1)
 
-    if any(w in t for w in ["поссор", "обид", "отношен", "не понимаю его"]):
-        return "psycho"
+    except:
+        return None
 
-    if any(w in t for w in ["болит", "температура", "симптом"]):
-        return "health"
+    return None
 
-    return "chat"
 
-# ================= REMINDER WORKER =================
+# ================= REMINDER =================
 
-async def reminder_worker():
-    while True:
-        now = datetime.now()
+async def reminder_worker(user_id, text, remind_time):
+    wait = (remind_time - datetime.now()).total_seconds()
 
-        for user_id in list(reminders.keys()):
-            new_list = []
+    if wait > 0:
+        await asyncio.sleep(wait)
 
-            for r in reminders[user_id]:
-                if now >= r["time"]:
-                    try:
-                        await bot.send_message(user_id, f"⏰ Напоминание: {r['text']}")
-                    except:
-                        pass
-                else:
-                    new_list.append(r)
+    try:
+        await bot.send_message(user_id, f"⏰ Напоминание: {text}")
+    except:
+        pass
 
-            reminders[user_id] = new_list
 
-        await asyncio.sleep(30)
+# ================= OPENROUTER =================
 
-# ================= AI =================
-
-def ask_ai(user_id, message, mode=None):
-    system = BASE_SYSTEM
-
-    if mode == "psycho":
-        system += PSYCHO_MODE
-
-    if mode == "health":
-        system += HEALTH_MODE
+def ask_openrouter(user_id, message):
+    print("🧠 OPENROUTER")
 
     history = user_memory.get(user_id, [])
 
-    messages = [{"role": "system", "content": system}]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages += history[-5:]
     messages.append({"role": "user", "content": message})
 
@@ -143,17 +117,17 @@ def ask_ai(user_id, message, mode=None):
             json={
                 "model": "mistralai/mixtral-8x7b-instruct",
                 "messages": messages,
-                "temperature": 0.9 if mode == "psycho" else 0.7
+                "temperature": 0.85
             },
             timeout=15
         )
 
         if response.status_code != 200:
-            print("❌ OpenRouter:", response.text)
+            print("❌ OpenRouter:", response.status_code, response.text)
             return None
 
         data = response.json()
-        reply = safe_get(data)
+        reply = safe_get_content(data)
 
         if not reply:
             return None
@@ -165,75 +139,91 @@ def ask_ai(user_id, message, mode=None):
         return reply
 
     except Exception as e:
-        print("❌ OpenRouter EX:", e)
+        print("❌ OpenRouter ERROR:", e)
         return None
+
 
 # ================= HANDLER =================
 
 @dp.message()
 async def handle_message(message: types.Message):
-    text = message.text or ""
+    text = message.text
     user_id = message.from_user.id
 
-    intent = detect_intent(text)
-
-    # -------- НАПОМИНАНИЯ --------
-    if intent == "reminder":
-        remind_time = datetime.now() + timedelta(minutes=1)
-
-        reminders.setdefault(user_id, []).append({
-            "text": text,
-            "time": remind_time
-        })
-
-        await message.answer("⏰ Ок, напомню через минуту (временно)")
+    if not text:
+        await message.answer("Не совсем тебя понял, уточни 🙏")
         return
 
-    # -------- ЗАМЕТКИ --------
-    if intent == "note":
-        notes.setdefault(user_id, []).append(text)
+    # ================= НАПОМИНАНИЯ =================
+
+    if "напомни" in text.lower():
+        remind_time = parse_time(text)
+
+        if not remind_time:
+            user_states[user_id] = {"mode": "await_time", "text": text}
+            await message.answer("Когда напомнить?")
+            return
+
+        asyncio.create_task(reminder_worker(user_id, text, remind_time))
+        await message.answer("✅ Напоминание поставил")
+        return
+
+    # === ожидание времени ===
+
+    if user_states.get(user_id, {}).get("mode") == "await_time":
+        remind_time = parse_time(text)
+
+        if not remind_time:
+            await message.answer("Напиши время так: 'через 10 минут' или 'через 1 час'")
+            return
+
+        original_text = user_states[user_id]["text"]
+
+        asyncio.create_task(reminder_worker(user_id, original_text, remind_time))
+
+        user_states.pop(user_id)
+
+        await message.answer("✅ Напоминание поставил")
+        return
+
+    # ================= ЗАМЕТКИ =================
+
+    if "запомни" in text.lower() or "запиши" in text.lower():
+        notes = notes_db.get(user_id, [])
+        notes.append(text)
+        notes_db[user_id] = notes
+
         await message.answer("📝 Записал")
         return
 
-    # -------- ПОКАЗ --------
-    if intent == "show_notes":
-        data = notes.get(user_id, [])
-        if not data:
-            await message.answer("📭 Нет заметок")
-        else:
-            await message.answer("\n".join(data))
+    if "покажи заметки" in text.lower():
+        notes = notes_db.get(user_id, [])
+
+        if not notes:
+            await message.answer("Пока пусто")
+            return
+
+        await message.answer("\n".join(notes))
         return
 
-    if intent == "show_reminders":
-        data = reminders.get(user_id, [])
-        if not data:
-            await message.answer("📭 Нет напоминаний")
-        else:
-            txt = "\n".join([r["text"] for r in data])
-            await message.answer(txt)
-        return
-
-    # -------- AI --------
-    mode = None
-    if intent == "psycho":
-        mode = "psycho"
-    elif intent == "health":
-        mode = "health"
+    # ================= AI =================
 
     if not is_russian(text):
         text = f"Ответь на русском: {text}"
 
-    reply = ask_ai(user_id, text, mode)
+    reply = ask_openrouter(user_id, text)
 
     if not reply:
-        reply = "❌ AI временно недоступен"
+        reply = "Не совсем тебя понял, уточни 🙏"
 
     await message.answer(reply)
+
 
 # ================= HEALTH =================
 
 async def health(request):
     return web.Response(text="OK")
+
 
 async def start_health_server():
     app = web.Application()
@@ -248,41 +238,32 @@ async def start_health_server():
 
     print("🌐 Сервер здоровья запущен")
 
+
 # ================= MAIN =================
 
 async def main():
     print("🚀 БОТ ЗАПУЩЕН")
 
-    # 🛑 АНТИ-ДУБЛЬ (lock-файл)
-    lock_file = "/tmp/bot.lock"
+    # 🛑 анти-дубль Railway
+    run_uid = os.getenv("RAILWAY_RUN_UID")
+    deploy_id = os.getenv("RAILWAY_DEPLOYMENT_ID")
 
-    if os.path.exists(lock_file):
-        print("⛔ Уже запущен — выходим")
+    if run_uid and deploy_id and run_uid != deploy_id:
+        print("⛔ Второй инстанс — выходим")
         return
 
-    with open(lock_file, "w") as f:
-        f.write("locked")
+    await start_health_server()
+
+    await bot.delete_webhook(drop_pending_updates=True)
+    await asyncio.sleep(2)
 
     try:
-        await start_health_server()
+        await bot.send_message(ADMIN_ID, "✅ Бот перезапущен")
+    except:
+        pass
 
-        await bot.delete_webhook(drop_pending_updates=True)
-        await asyncio.sleep(3)
+    await dp.start_polling(bot)
 
-        try:
-            await bot.send_message(ADMIN_ID, "✅ Бот перезапущен")
-        except:
-            pass
-
-        asyncio.create_task(reminder_worker())
-
-        await dp.start_polling(bot)
-
-    finally:
-        if os.path.exists(lock_file):
-            os.remove(lock_file)
-
-# ================= START =================
 
 if __name__ == "__main__":
     asyncio.run(main())
