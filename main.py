@@ -186,11 +186,13 @@ async def start_health():
 async def main():
     logging.info("🚀 БОТ ЗАПУЩЕН")
 
-    # 🛑 анти-дубль Railway (правильный)
-    if os.getenv("RAILWAY_ENVIRONMENT") == "production":
-        if os.getenv("RAILWAY_REPLICA_ID") not in (None, "0"):
-            logging.warning("⛔ Второй инстанс — выходим")
-            return
+    # 🛑 анти-дубль (фикс)
+    run_uid = os.getenv("RAILWAY_RUN_UID")
+    deploy_id = os.getenv("RAILWAY_DEPLOYMENT_ID")
+
+    if run_uid and deploy_id and run_uid != deploy_id:
+        logging.warning("⛔ Второй инстанс — выходим")
+        return
 
     await init_db()
     await start_health()
