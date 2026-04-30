@@ -17,40 +17,53 @@ GROK_API_KEY = os.getenv("GROK_API_KEY")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ================== SYSTEM PROMPTS ==================
+# ================== SYSTEM ==================
 
-SYSTEM_QWEN = "Ты живой дружелюбный собеседник. Отвечай естественно и понятно."
-SYSTEM_OPENAI = "Ты резервный ассистент. Помогай если основной не справился."
-SYSTEM_GROK = "Ты деловой секретарь. Формулируй чётко, структурированно."
+SYSTEM_QWEN = "Ты дружелюбный собеседник."
+SYSTEM_OPENAI = "Ты резервный помощник."
+SYSTEM_GROK = "Ты деловой секретарь."
 
-# ================== AI FUNCTIONS ==================
+# ================== QWEN (FIXED) ==================
 
 async def ask_qwen(text):
-    url = "https://api.qwen.ai/v1/chat/completions"
+    url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+
     headers = {
         "Authorization": f"Bearer {QWEN_API_KEY}",
         "Content-Type": "application/json"
     }
+
     data = {
         "model": "qwen-plus",
-        "messages": [
-            {"role": "system", "content": SYSTEM_QWEN},
-            {"role": "user", "content": text}
-        ]
+        "input": {
+            "messages": [
+                {"role": "system", "content": SYSTEM_QWEN},
+                {"role": "user", "content": text}
+            ]
+        }
     }
 
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=data, headers=headers) as resp:
-            res = await resp.json()
-            return res["choices"][0]["message"]["content"]
+            if resp.status != 200:
+                text_resp = await resp.text()
+                raise Exception(f"Qwen HTTP {resp.status}: {text_resp}")
 
+            res = await resp.json()
+
+            return res["output"]["text"]
+
+
+# ================== OPENAI (FIXED) ==================
 
 async def ask_openai(text):
     url = "https://api.openai.com/v1/chat/completions"
+
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
+
     data = {
         "model": "gpt-4o-mini",
         "messages": [
@@ -62,15 +75,23 @@ async def ask_openai(text):
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=data, headers=headers) as resp:
             res = await resp.json()
+
+            if "choices" not in res:
+                raise Exception(f"OpenAI error: {res}")
+
             return res["choices"][0]["message"]["content"]
 
 
+# ================== GROK ==================
+
 async def ask_grok(text):
     url = "https://api.x.ai/v1/chat/completions"
+
     headers = {
         "Authorization": f"Bearer {GROK_API_KEY}",
         "Content-Type": "application/json"
     }
+
     data = {
         "model": "grok-beta",
         "messages": [
@@ -82,6 +103,10 @@ async def ask_grok(text):
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=data, headers=headers) as resp:
             res = await resp.json()
+
+            if "choices" not in res:
+                raise Exception(f"Grok error: {res}")
+
             return res["choices"][0]["message"]["content"]
 
 
@@ -90,24 +115,24 @@ async def ask_grok(text):
 async def ask_ai(text):
     text_lower = text.lower()
 
-    # если задача/формулировка → Grok
-    if any(w in text_lower for w in ["сделай", "напиши", "сформулируй", "задача", "план"]):
+    # секретарь
+    if any(w in text_lower for w in ["сделай", "напиши", "сформулируй", "план"]):
         try:
             print("🧠 GROK")
             return await ask_grok(text)
         except Exception as e:
             print("❌ Grok:", e)
 
-    # основной → Qwen
+    # основной
     try:
         print("🧠 QWEN")
         return await ask_qwen(text)
     except Exception as e:
         print("❌ Qwen:", e)
 
-    # резерв → OpenAI
+    # fallback
     try:
-        print("🧠 OPENAI (fallback)")
+        print("🧠 OPENAI")
         return await ask_openai(text)
     except Exception as e:
         print("❌ OpenAI:", e)
@@ -123,18 +148,11 @@ async def start(message: types.Message):
 
 @dp.message()
 async def chat(message: types.Message):
-    user_text = message.text
-
-    try:
-        response = await ask_ai(user_text)
-    except Exception as e:
-        print("❌ Общая ошибка:", e)
-        response = "⚠️ Ошибка обработки"
-
+    response = await ask_ai(message.text)
     await message.answer(response)
 
 
-# ================== HEALTH SERVER ==================
+# ================== HEALTH ==================
 
 async def health(request):
     return web.Response(text="OK")
@@ -160,7 +178,6 @@ async def main():
 
     await start_health_server()
 
-    # фикс Telegram конфликта
     await bot.delete_webhook(drop_pending_updates=True)
 
     await dp.start_polling(bot)
