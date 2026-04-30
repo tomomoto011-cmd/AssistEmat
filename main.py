@@ -68,6 +68,7 @@ def ask_openrouter(user_id, message):
         )
 
         if r.status_code != 200:
+            logging.error(f"OpenRouter error: {r.text}")
             return None
 
         data = r.json()
@@ -79,7 +80,8 @@ def ask_openrouter(user_id, message):
 
         return reply
 
-    except:
+    except Exception as e:
+        logging.error(f"OpenRouter exception: {e}")
         return None
 
 
@@ -104,11 +106,13 @@ def ask_qwen(message):
         )
 
         if r.status_code != 200:
+            logging.error(f"Qwen error: {r.text}")
             return None
 
         return r.json()["output"]["text"]
 
-    except:
+    except Exception as e:
+        logging.error(f"Qwen exception: {e}")
         return None
 
 # ================= MENU =================
@@ -139,14 +143,24 @@ async def callbacks(call: types.CallbackQuery):
         text = "\n".join(notes) if notes else "Нет заметок"
         await call.message.answer(f"📝 Заметки:\n{text}")
 
-    if call.data == "reminders":
+    elif call.data == "reminders":
         rems = reminders_db.get(user_id, [])
         text = "\n".join([r["text"] for r in rems]) if rems else "Нет напоминаний"
         await call.message.answer(f"⏰ Напоминания:\n{text}")
 
-# ================= FSM FLOW =================
+# ================= NOTES =================
 
-@dp.message(lambda m: "напомни" in safe_text(m.text).lower())
+@dp.message(lambda m: m.text and "запомни" in m.text.lower())
+async def save_note(message: types.Message):
+    user_id = message.from_user.id
+    text = message.text.replace("запомни", "").strip()
+
+    notes_db.setdefault(user_id, []).append(text)
+    await message.answer("📝 Сохранил")
+
+# ================= REMINDER FSM =================
+
+@dp.message(lambda m: m.text and "напомни" in m.text.lower())
 async def start_reminder(message: types.Message, state: FSMContext):
     await state.set_state(ReminderFSM.waiting_text)
     await message.answer("Что напомнить?")
@@ -155,12 +169,12 @@ async def start_reminder(message: types.Message, state: FSMContext):
 async def get_text(message: types.Message, state: FSMContext):
     await state.update_data(text=message.text)
     await state.set_state(ReminderFSM.waiting_time)
-    await message.answer("Когда напомнить? (например: через 10 минут)")
+    await message.answer("Когда напомнить?")
 
 @dp.message(ReminderFSM.waiting_time)
 async def get_time(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    text = data["text"]
+    text = data.get("text")
 
     remind_time = datetime.now() + timedelta(minutes=1)
 
@@ -173,17 +187,17 @@ async def get_time(message: types.Message, state: FSMContext):
 
     asyncio.create_task(reminder_task(message.chat.id, text, remind_time))
 
-    await message.answer(f"⏰ Напомню: {text}")
+    await message.answer("⏰ Напоминание создано (пока +1 минута)")
     await state.clear()
 
-# ================= REMINDER =================
+# ================= REMINDER TASK =================
 
 async def reminder_task(chat_id, text, when):
     delay = (when - datetime.now()).total_seconds()
     await asyncio.sleep(max(0, delay))
     await bot.send_message(chat_id, f"🔔 Напоминание: {text}")
 
-# ================= MAIN HANDLER =================
+# ================= CHAT =================
 
 @dp.message()
 async def chat(message: types.Message):
@@ -227,16 +241,10 @@ async def start_health():
 async def main():
     logging.info("🚀 БОТ ЗАПУЩЕН")
 
-    # анти-дубль
-    if os.getenv("RAILWAY_ENVIRONMENT") == "production":
-        if os.getenv("RAILWAY_REPLICA_ID") not in (None, "0"):
-            logging.warning("⛔ Второй инстанс — выходим")
-            return
-
     await start_health()
 
     await bot.delete_webhook(drop_pending_updates=True)
-    await asyncio.sleep(1)
+    await asyncio.sleep(2)
 
     await dp.start_polling(bot)
 
