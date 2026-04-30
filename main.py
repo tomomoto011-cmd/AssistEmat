@@ -22,7 +22,6 @@ dp = Dispatcher()
 # ================= STORAGE =================
 
 user_memory = {}
-
 notes = {}
 reminders = {}
 
@@ -31,10 +30,10 @@ reminders = {}
 BASE_SYSTEM = """
 Ты — живой ассистент.
 
-Всегда:
-- отвечай на русском
-- пиши естественно
-- без "я как AI"
+Правила:
+- Всегда отвечай на русском
+- Пиши естественно
+- Без "я как AI"
 
 Если не понял:
 → "Не совсем тебя понял, уточни пожалуйста 🙏"
@@ -64,6 +63,7 @@ def safe_get(data):
     try:
         return data["choices"][0]["message"]["content"]
     except:
+        print("❌ формат ответа:", data)
         return None
 
 # ================= DETECT =================
@@ -86,15 +86,15 @@ def detect_intent(text):
     if "удали" in t:
         return "delete"
 
-    if any(w in t for w in ["поссор", "обид", "не понимаю его", "отношен"]):
+    if any(w in t for w in ["поссор", "обид", "отношен", "не понимаю его"]):
         return "psycho"
 
-    if any(w in t for w in ["болит", "температура", "симптом", "здоров"]):
+    if any(w in t for w in ["болит", "температура", "симптом"]):
         return "health"
 
     return "chat"
 
-# ================= REMINDERS =================
+# ================= REMINDER WORKER =================
 
 async def reminder_worker():
     while True:
@@ -102,6 +102,7 @@ async def reminder_worker():
 
         for user_id in list(reminders.keys()):
             new_list = []
+
             for r in reminders[user_id]:
                 if now >= r["time"]:
                     try:
@@ -148,7 +149,7 @@ def ask_ai(user_id, message, mode=None):
         )
 
         if response.status_code != 200:
-            print(response.text)
+            print("❌ OpenRouter:", response.text)
             return None
 
         data = response.json()
@@ -164,7 +165,7 @@ def ask_ai(user_id, message, mode=None):
         return reply
 
     except Exception as e:
-        print(e)
+        print("❌ OpenRouter EX:", e)
         return None
 
 # ================= HANDLER =================
@@ -176,19 +177,19 @@ async def handle_message(message: types.Message):
 
     intent = detect_intent(text)
 
-    # -------- НАПОМИНАНИЕ --------
+    # -------- НАПОМИНАНИЯ --------
     if intent == "reminder":
-        time = datetime.now() + timedelta(minutes=1)
+        remind_time = datetime.now() + timedelta(minutes=1)
 
         reminders.setdefault(user_id, []).append({
             "text": text,
-            "time": time
+            "time": remind_time
         })
 
-        await message.answer("⏰ Ок, напомню через минуту (пока базово)")
+        await message.answer("⏰ Ок, напомню через минуту (временно)")
         return
 
-    # -------- ЗАМЕТКА --------
+    # -------- ЗАМЕТКИ --------
     if intent == "note":
         notes.setdefault(user_id, []).append(text)
         await message.answer("📝 Записал")
@@ -213,7 +214,6 @@ async def handle_message(message: types.Message):
         return
 
     # -------- AI --------
-
     mode = None
     if intent == "psycho":
         mode = "psycho"
@@ -226,7 +226,7 @@ async def handle_message(message: types.Message):
     reply = ask_ai(user_id, text, mode)
 
     if not reply:
-        reply = "❌ Не удалось получить ответ"
+        reply = "❌ AI временно недоступен"
 
     await message.answer(reply)
 
@@ -246,26 +246,43 @@ async def start_health_server():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
 
+    print("🌐 Сервер здоровья запущен")
+
 # ================= MAIN =================
 
 async def main():
     print("🚀 БОТ ЗАПУЩЕН")
 
-    run_uid = os.getenv("RAILWAY_RUN_UID")
-    deploy_id = os.getenv("RAILWAY_DEPLOYMENT_ID")
+    # 🛑 АНТИ-ДУБЛЬ (lock-файл)
+    lock_file = "/tmp/bot.lock"
 
-    if run_uid and deploy_id and run_uid != deploy_id:
-        print("⛔ дубль")
+    if os.path.exists(lock_file):
+        print("⛔ Уже запущен — выходим")
         return
 
-    await start_health_server()
+    with open(lock_file, "w") as f:
+        f.write("locked")
 
-    await bot.delete_webhook(drop_pending_updates=True)
-    await asyncio.sleep(2)
+    try:
+        await start_health_server()
 
-    asyncio.create_task(reminder_worker())
+        await bot.delete_webhook(drop_pending_updates=True)
+        await asyncio.sleep(3)
 
-    await dp.start_polling(bot)
+        try:
+            await bot.send_message(ADMIN_ID, "✅ Бот перезапущен")
+        except:
+            pass
+
+        asyncio.create_task(reminder_worker())
+
+        await dp.start_polling(bot)
+
+    finally:
+        if os.path.exists(lock_file):
+            os.remove(lock_file)
+
+# ================= START =================
 
 if __name__ == "__main__":
     asyncio.run(main())
