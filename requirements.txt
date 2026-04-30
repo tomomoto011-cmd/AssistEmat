@@ -1,5 +1,6 @@
-aiogram==3.7.0
+aiogram
 aiosqlite
 httpx
 python-dotenv
 apscheduler
+redis>=5.0.0
