@@ -1,7 +1,8 @@
 import asyncio
 import logging
 import os
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -46,10 +47,7 @@ async def init_db():
         await db.executescript("""
         CREATE TABLE IF NOT EXISTS users(
             user_id INTEGER PRIMARY KEY,
-            name TEXT,
-            age TEXT,
-            gender TEXT,
-            style TEXT
+            name TEXT
         );
 
         CREATE TABLE IF NOT EXISTS notes(
@@ -76,7 +74,8 @@ async def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             name TEXT,
-            done INTEGER DEFAULT 0
+            streak INTEGER DEFAULT 0,
+            last_done TEXT
         );
 
         CREATE TABLE IF NOT EXISTS emotions(
@@ -89,9 +88,6 @@ async def init_db():
 # ======================
 # FSM
 # ======================
-class Register(StatesGroup):
-    name = State()
-
 class ReminderFSM(StatesGroup):
     text = State()
     time = State()
@@ -107,6 +103,27 @@ def fix_layout(text):
         "йцукенгшщзхъфывапролджэячсмитьбю"
     )
     return text.translate(layout_map)
+
+# ======================
+# ⏰ ПАРСИНГ ВРЕМЕНИ
+# ======================
+def parse_time(text: str):
+    text = text.lower()
+
+    if "через час" in text:
+        return datetime.now() + timedelta(hours=1)
+
+    if "завтра" in text:
+        base = datetime.now() + timedelta(days=1)
+        match = re.search(r'(\d{1,2}):(\d{2})', text)
+        if match:
+            return base.replace(hour=int(match.group(1)), minute=int(match.group(2)))
+        return base.replace(hour=9, minute=0)
+
+    try:
+        return datetime.fromisoformat(text)
+    except:
+        return None
 
 # ======================
 # ПАМЯТЬ
@@ -151,21 +168,13 @@ async def get_mood(user_id):
 # ======================
 # AI
 # ======================
-async def ask_ai(user_id, text, user):
+async def ask_ai(user_id, text):
     context = await get_memory(user_id)
     mood = await get_mood(user_id)
 
-    system_prompt = f"""
-Имя: {user['name']}
-Стиль: {user['style']}
-Настроение: {mood}
-
-Отвечай на русском.
-"""
-
-    messages = [{"role": "system", "content": system_prompt}] + context + [
-        {"role": "user", "content": text}
-    ]
+    messages = [
+        {"role": "system", "content": f"Настроение пользователя: {mood}. Отвечай на русском."}
+    ] + context + [{"role": "user", "content": text}]
 
     try:
         async with httpx.AsyncClient() as client:
@@ -177,23 +186,13 @@ async def ask_ai(user_id, text, user):
             )
             return r.json()["choices"][0]["message"]["content"]
     except:
-        try:
-            async with httpx.AsyncClient() as client:
-                r = await client.post(
-                    "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
-                    headers={"Authorization": f"Bearer {QWEN_API_KEY}"},
-                    json={"input": {"messages": messages}},
-                    timeout=15
-                )
-                return r.json()["output"]["text"]
-        except:
-            return "❌ AI недоступен"
+        return "❌ AI недоступен"
 
 # ======================
 # НАПОМИНАНИЯ
 # ======================
 async def send_reminder(user_id, text):
-    await bot.send_message(user_id, f"⏰ Напоминание: {text}")
+    await bot.send_message(user_id, f"⏰ {text}")
 
 async def load_reminders():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -208,15 +207,15 @@ async def load_reminders():
 async def reminder_start(message: Message, state: FSMContext):
     await state.set_state(ReminderFSM.text)
     await state.update_data(text=message.text)
-    await message.answer("Когда? (пример: 2026-05-01 18:00)")
+    await message.answer("Когда? (можно: 'через час', 'завтра 18:00')")
 
 @dp.message(ReminderFSM.text)
 async def reminder_time(message: Message, state: FSMContext):
     data = await state.get_data()
-    try:
-        dt = datetime.fromisoformat(message.text)
-    except:
-        await message.answer("Неверный формат")
+    dt = parse_time(message.text)
+
+    if not dt:
+        await message.answer("Не понял время")
         return
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -229,25 +228,49 @@ async def reminder_time(message: Message, state: FSMContext):
     scheduler.add_job(send_reminder, "date", run_date=dt,
                       args=[message.from_user.id, data["text"]])
 
-    await message.answer("⏰ Готово")
+    await message.answer("⏰ Напоминание поставлено")
     await state.clear()
 
 # ======================
-# ЗАМЕТКИ
+# ЗАМЕТКИ (категории + CRUD)
 # ======================
 @dp.message(F.text.lower().contains("запомни"))
 async def add_note(message: Message):
+    parts = message.text.split("#")
+    text = parts[0]
+    category = parts[1] if len(parts) > 1 else "общие"
+
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT INTO notes(user_id, text, category) VALUES (?, ?, ?)",
-            (message.from_user.id, message.text, "общие")
+            (message.from_user.id, text, category)
         )
         await db.commit()
 
-    await message.answer("📌 Сохранил")
+    await message.answer(f"📌 Сохранил в категорию: {category}")
+
+@dp.callback_query(F.data == "notes")
+async def show_notes(call: CallbackQuery):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT id, text, category FROM notes WHERE user_id=?", (call.from_user.id,))
+        rows = await cur.fetchall()
+
+    for n in rows:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Удалить", callback_data=f"del_note_{n[0]}")]
+        ])
+        await call.message.answer(f"[{n[2]}] {n[1]}", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("del_note_"))
+async def delete_note(call: CallbackQuery):
+    nid = int(call.data.split("_")[2])
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM notes WHERE id=?", (nid,))
+        await db.commit()
+    await call.message.edit_text("Удалено")
 
 # ======================
-# ПРИВЫЧКИ
+# ПРИВЫЧКИ (streak)
 # ======================
 @dp.message(F.text.lower().contains("привычка"))
 async def add_habit(message: Message):
@@ -258,7 +281,48 @@ async def add_habit(message: Message):
         )
         await db.commit()
 
-    await message.answer("💪 Добавил привычку")
+    await message.answer("💪 Привычка добавлена")
+
+@dp.callback_query(F.data == "habits")
+async def show_habits(call: CallbackQuery):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT id, name, streak FROM habits WHERE user_id=?", (call.from_user.id,))
+        rows = await cur.fetchall()
+
+    for h in rows:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✔️", callback_data=f"done_{h[0]}")]
+        ])
+        await call.message.answer(f"{h[1]} | 🔥 {h[2]}", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("done_"))
+async def done_habit(call: CallbackQuery):
+    hid = int(call.data.split("_")[1])
+    now = datetime.now().date()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT streak, last_done FROM habits WHERE id=?", (hid,))
+        row = await cur.fetchone()
+
+        streak, last_done = row
+        last_done = datetime.fromisoformat(last_done).date() if last_done else None
+
+        if last_done == now:
+            await call.message.answer("Уже отмечено сегодня")
+            return
+
+        if last_done == now - timedelta(days=1):
+            streak += 1
+        else:
+            streak = 1
+
+        await db.execute(
+            "UPDATE habits SET streak=?, last_done=? WHERE id=?",
+            (streak, now.isoformat(), hid)
+        )
+        await db.commit()
+
+    await call.message.edit_text(f"🔥 Серия: {streak}")
 
 # ======================
 # МЕНЮ
@@ -266,7 +330,6 @@ async def add_habit(message: Message):
 def menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📌 Заметки", callback_data="notes")],
-        [InlineKeyboardButton(text="⏰ Напоминания", callback_data="reminders")],
         [InlineKeyboardButton(text="💪 Привычки", callback_data="habits")]
     ])
 
@@ -288,11 +351,7 @@ async def chat(message: Message):
         await save_memory(message.from_user.id, "user", text)
         await update_emotion(message.from_user.id, text)
 
-        answer = await ask_ai(
-            message.from_user.id,
-            text,
-            {"name": "друг", "style": "friend"}
-        )
+        answer = await ask_ai(message.from_user.id, text)
 
         await save_memory(message.from_user.id, "assistant", answer)
 
