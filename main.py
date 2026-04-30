@@ -10,6 +10,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import CommandStart
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.memory import MemoryStorage  # 🔥 ФИКС FSM
 
 import aiosqlite
 import httpx
@@ -26,7 +27,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+dp = Dispatcher(storage=MemoryStorage())
 
 DB_PATH = "bot.db"
 scheduler = AsyncIOScheduler()
@@ -83,23 +84,11 @@ async def anti_duplicate(handler, event, data):
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript("""
-        CREATE TABLE IF NOT EXISTS users(
-            user_id INTEGER PRIMARY KEY,
-            name TEXT
-        );
+        CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY, name TEXT);
 
-        CREATE TABLE IF NOT EXISTS memory(
-            user_id INTEGER,
-            role TEXT,
-            content TEXT
-        );
+        CREATE TABLE IF NOT EXISTS memory(user_id INTEGER, role TEXT, content TEXT);
 
-        CREATE TABLE IF NOT EXISTS reminders(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            text TEXT,
-            remind_at TEXT
-        );
+        CREATE TABLE IF NOT EXISTS reminders(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, text TEXT, remind_at TEXT);
 
         CREATE TABLE IF NOT EXISTS habits(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -109,10 +98,7 @@ async def init_db():
             last_done TEXT
         );
 
-        CREATE TABLE IF NOT EXISTS emotions(
-            user_id INTEGER,
-            mood TEXT
-        );
+        CREATE TABLE IF NOT EXISTS emotions(user_id INTEGER, mood TEXT);
         """)
         await db.commit()
 
@@ -176,6 +162,8 @@ async def update_emotion(uid, text):
         mood = "грусть"
     elif "рад" in text:
         mood = "радость"
+    elif "устал" in text:
+        mood = "усталость"
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT INTO emotions VALUES (?, ?)", (uid, mood))
@@ -191,7 +179,7 @@ async def get_mood(uid):
         return row[0] if row else "нейтральное"
 
 # ======================
-# ДАВЛЕНИЕ + ANALYZE
+# 💪 ДАВЛЕНИЕ
 # ======================
 def pressure_text(streak, missed=False):
     if missed:
@@ -202,25 +190,46 @@ def pressure_text(streak, missed=False):
         return "Неплохо. Но расслабишься — откатишься."
     return "Начал — доведи."
 
+# ======================
+# 🧠 ПОВЕДЕНКА + AI ХАБИТЫ
+# ======================
 async def behavior_analyze(uid, text):
     mood = await get_mood(uid)
 
     if "устал" in text:
-        return "Ты часто устаёшь. Добавим привычку: сон до 23:00?"
+        await create_habit(uid, "Сон до 23:00")
+        return "Ты часто устаёшь. Добавил привычку: сон до 23:00"
 
     if mood == "грусть":
         return "Окей. Сегодня без давления. Но не пропадай."
 
     return None
 
+async def create_habit(uid, name):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT id FROM habits WHERE user_id=? AND name=?",
+            (uid, name)
+        )
+        if await cur.fetchone():
+            return
+
+        await db.execute(
+            "INSERT INTO habits(user_id, name) VALUES (?, ?)",
+            (uid, name)
+        )
+        await db.commit()
+
 # ======================
-# AI
+# 🤖 AI
 # ======================
 async def ask_ai(uid, text):
     ctx = await get_memory(uid)
     mood = await get_mood(uid)
 
-    messages = [{"role": "system", "content": f"Настроение: {mood}. Будь давящим."}] + ctx + [{"role": "user", "content": text}]
+    messages = [
+        {"role": "system", "content": f"Настроение: {mood}. Будь давящим и живым."}
+    ] + ctx + [{"role": "user", "content": text}]
 
     try:
         async with httpx.AsyncClient() as client:
@@ -233,6 +242,24 @@ async def ask_ai(uid, text):
             return r.json()["choices"][0]["message"]["content"]
     except:
         return "❌ AI ошибка"
+
+# ======================
+# 🔥 REAL HABIT ENGINE
+# ======================
+async def habit_check():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT id,user_id,name,streak,last_done FROM habits")
+        habits = await cur.fetchall()
+
+    for hid, uid, name, streak, last in habits:
+        if not last:
+            continue
+
+        last = datetime.fromisoformat(last).date()
+        now = datetime.now().date()
+
+        if last < now - timedelta(days=1):
+            await bot.send_message(uid, f"{name}\nТы пропустил. Это откат.")
 
 # ======================
 # REMINDERS
@@ -256,12 +283,11 @@ async def reminder_time(msg: Message, state: FSMContext):
         return
 
     scheduler.add_job(send_reminder, "date", run_date=dt, args=[msg.from_user.id, data["text"]])
-
     await msg.answer("Поставил ⏰")
     await state.clear()
 
 # ======================
-# HABITS
+# HABITS BUTTON
 # ======================
 @dp.callback_query(F.data.startswith("done_"))
 async def done(call: CallbackQuery):
@@ -292,8 +318,11 @@ async def done(call: CallbackQuery):
     await call.message.edit_text(pressure_text(streak, missed))
 
 # ======================
-# RETENTION
+# RETENTION++
 # ======================
+FACTS = ["Факт: мозг жрет 20% энергии", "Факт: привычки = система"]
+QUOTES = ["Дисциплина — выбор", "Делай или оправдывайся"]
+
 async def retention():
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT user_id FROM users")
@@ -302,6 +331,8 @@ async def retention():
     for u in users:
         try:
             await bot.send_message(u[0], "Ты пропал. Возвращайся.")
+            await bot.send_message(u[0], random.choice(FACTS))
+            await bot.send_message(u[0], random.choice(QUOTES))
         except:
             pass
 
@@ -310,6 +341,9 @@ async def retention():
 # ======================
 @dp.message()
 async def chat(msg: Message):
+    if not msg.text:
+        return
+
     text = msg.text
 
     await save_memory(msg.from_user.id, "user", text)
@@ -347,6 +381,7 @@ async def main():
     if IS_MAIN:
         scheduler.start()
         scheduler.add_job(retention, "interval", hours=12)
+        scheduler.add_job(habit_check, "interval", hours=6)
         asyncio.create_task(keep_lock_alive())
 
     if IS_MAIN:
