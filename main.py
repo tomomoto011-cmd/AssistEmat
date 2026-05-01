@@ -1,5 +1,5 @@
 # =========================================================
-#  ASSISTEMPAT BOT v2.4 (Adaptive personality + Practical help)
+#  ASSISTEMPAT BOT v2.4-fix (Railway health-check + stable polling)
 #  Архитектура: Grok (анализ) + OpenAI (адаптивный ответ)
 #  Режимы: Здоровье (сухой) / Психология (эмпат) / Секретарь (позитив) / Болтовня (юмор)
 # =========================================================
@@ -26,6 +26,9 @@ import httpx
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+# 🔥 Health server imports
+from aiohttp import web
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -39,6 +42,9 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
 CITY_DEFAULT = os.getenv("CITY_DEFAULT", "Москва")
 ALLOWED_USERS = os.getenv("ALLOWED_USERS", "")
+
+# 🔥 Порт для health-check (Railway compatibility)
+HEALTH_PORT = int(os.getenv("PORT", os.getenv("RAILWAY_PUBLIC_PORT", 8080)))
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -55,27 +61,19 @@ FRUSTRATION_KEYWORDS = ["скотина", "бесчувственный", "бе�
 RESET_KEYWORDS = ["привет", "здравствуй", "отбой", "стоп", "новое", "другое", "меню", "пока", "до свидания"]
 
 def detect_mode(text: str) -> str:
-    """Определяет режим: health/psychology/secretary/chat"""
     text_lower = text.lower()
-    if any(kw in text_lower for kw in HEALTH_KEYWORDS):
-        return "health"
-    if any(kw in text_lower for kw in PSYCHO_KEYWORDS):
-        return "psychology"
-    if any(kw in text_lower for kw in SECRETARY_KEYWORDS):
-        return "secretary"
+    if any(kw in text_lower for kw in HEALTH_KEYWORDS): return "health"
+    if any(kw in text_lower for kw in PSYCHO_KEYWORDS): return "psychology"
+    if any(kw in text_lower for kw in SECRETARY_KEYWORDS): return "secretary"
     return "chat"
 
 def is_crisis(text: str) -> tuple[bool, str]:
-    """Проверяет на критические ситуации"""
     text_lower = text.lower()
-    if any(w in text_lower for w in ["суицид", "умер", "не хочу жить", "убить себя"]):
-        return True, "critical"
-    if any(w in text_lower for w in ["паник", "не могу дышать", "сердце", "давление"]):
-        return True, "medical_emergency"
+    if any(w in text_lower for w in ["суицид", "умер", "не хочу жить", "убить себя"]): return True, "critical"
+    if any(w in text_lower for w in ["паник", "не могу дышать", "сердце", "давление"]): return True, "medical_emergency"
     return False, ""
 
 def should_reset_context(text: str) -> bool:
-    """Сбросить контекст?"""
     return any(kw in text.lower().strip() for kw in RESET_KEYWORDS)
 
 # ======================
@@ -106,28 +104,25 @@ async def init_db():
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders(remind_at)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id, status)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_response_log ON response_log(user_id, created_at DESC)")
-    logging.info("✅ PostgreSQL initialized + response_log table added")
+    logging.info("✅ PostgreSQL initialized")
 
 # ======================
-#  🔥 ANTI-LOOP: защита от повторов
+#  🔥 ANTI-LOOP
 # ======================
 async def is_duplicate_response(uid: int, new_text: str) -> bool:
-    """Проверяет, не повторял ли бот такой ответ недавно"""
-    if not new_text or len(new_text.strip()) < 5:
-        return False
+    if not new_text or len(new_text.strip()) < 5: return False
     new_hash = hashlib.md5(new_text.strip().lower().encode()).hexdigest()
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT content_hash FROM response_log WHERE user_id=$1 ORDER BY created_at DESC LIMIT 3", uid)
-        hashes = [r["content_hash"] for r in rows]
-        if new_hash in hashes:
-            logging.warning(f"🔄 Duplicate response detected for user {uid}")
+        if new_hash in [r["content_hash"] for r in rows]:
+            logging.warning(f"🔄 Duplicate for user {uid}")
             return True
         await conn.execute("INSERT INTO response_log(user_id, content_hash) VALUES ($1, $2)", uid, new_hash)
         await conn.execute("DELETE FROM response_log WHERE user_id=$1 AND id NOT IN (SELECT id FROM response_log WHERE user_id=$1 ORDER BY created_at DESC LIMIT 20)", uid)
     return False
 
 # ======================
-#  ССЫЛКИ НА ВНЕШНИЕ РЕСУРСЫ
+#  ССЫЛКИ
 # ======================
 def get_weather_link(city: str) -> str: return f"https://yandex.ru/pogoda/{urllib.parse.quote(city)}"
 def get_currency_link() -> str: return "https://www.cbr.ru/currency_base/daily/"
@@ -170,7 +165,7 @@ def external_link_keyboard(link: str, label: str = "Открыть"):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"🔗 {label}", url=link)]])
 
 # ======================
-#  GROK API (анализ + режимы)
+#  GROK API
 # ======================
 async def call_grok_analysis(text: str, history: list = None, profile: dict = None) -> dict:
     if not GROK_API_KEY:
@@ -207,85 +202,60 @@ async def call_grok_analysis(text: str, history: list = None, profile: dict = No
         return {"topic":"general","tags":[],"intent":"chat","emotional_tone":"neutral","action_items":[],"priority":"medium","refined_prompt":text,"is_task_creation":False,"external_link_needed":None,"external_link":None,"mode":"chat"}
 
 # ======================
-#  🔥 OPENAI (АДАПТИВНЫЙ ПОДХОД)
+#  OPENAI (АДАПТИВНЫЙ)
 # ======================
 async def call_openai_primary(user_text, grok_analysis, profile, mood, habits, memory, tasks_count=0, mode="chat"):
-    if not OPENROUTER_API_KEY:
-        return await call_qwen_fallback(user_text, grok_analysis, profile, mood, habits, memory, tasks_count)
+    if not OPENROUTER_API_KEY: return await call_qwen_fallback(user_text, grok_analysis, profile, mood, habits, memory, tasks_count)
     
     user_name = profile.get("name") if profile else ""
     habit_list = ", ".join([h[0] for h in habits]) if habits else "не заданы"
-    
     link_context = ""
     if grok_analysis.get("external_link"):
         link = grok_analysis["external_link"]
         label = grok_analysis.get("external_link_label", "Открыть")
         link_context = f"\n[Ссылка: {label} — {link}]"
     
-    # 🔥 АДАПТИВНЫЙ ПРОМПТ ПОД РЕЖИМ
     if mode == "health":
         mode_instruction = """
-🏥 РЕЖИМ: ЗДОРОВЬЕ (практический помощник)
+🏥 РЕЖИМ: ЗДОРОВЬЕ
 - Сухой, конкретный, без "воды"
-- ДАЙ ПРАКТИЧЕСКИЕ СОВЕТЫ: "приложи холод на 15-20 минут", "не нагружай", "проверь на отёк", "осмотри на наличие открытых ран"
-- Если серьёзно: "Срочно вызови скорую (103)" или "Обратись к врачу сегодня"
-- НЕ повторяй "обратись к врачу" без конкретики
+- ДАЙ ПРАКТИЧЕСКИЕ СОВЕТЫ: "приложи холод на 15-20 минут", "не нагружай", "проверь на отёк"
+- Если серьёзно: "Срочно вызови скорую (103)"
 - Эмодзи: 🩹🤒💊 (максимум 1)
-Примеры:
-ХОРОШО: "Приложи холод на 15-20 минут через ткань. Не нагружай ногу. Если есть отёк или не можешь наступать — срочно к травматологу. 🩹"
-ПЛОХО: "Обратись к врачу" (без деталей)
 """
     elif mode == "psychology":
         mode_instruction = """
-🧠 РЕЖИМ: ПСИХОЛОГИЯ (эмпатичный советник)
-- Задавай уточняющие вопросы: "Что именно произошло?", "Как ты себя чувствуешь?"
-- Помоги найти решение, а не просто выслушай
+🧠 РЕЖИМ: ПСИХОЛОГИЯ
+- Задавай уточняющие вопросы
+- Помоги найти решение
 - Не сюсюкай, но будь поддерживающим
-- Если кризис: "Ты не один. Позвони близким или на горячую линию (8-800-2000-122)"
 - Эмодзи: 🤍💙 (редко)
-Примеры:
-ХОРОШО: "Понимаю, что тяжело. Расскажи, что именно произошло? Давай разберёмся по шагам."
-ПЛОХО: "Я здесь чтобы поддержать тебя" (шаблон)
 """
     elif mode == "secretary":
         mode_instruction = """
-💼 РЕЖИМ: СЕКРЕТАРЬ (позитивный исполнитель)
-- Отвечай энергично: "Да, босс!", "Вас понял!", "Принято и сделано!", "Выполняю!"
-- Подтверждай действия: "Записал!", "Напомню в...", "Добавил в задачи!"
-- Будь кратким и позитивным
+💼 РЕЖИМ: СЕКРЕТАРЬ
+- Отвечай энергично: "Да, босс!", "Вас понял!", "Принято!"
+- Подтверждай действия кратко
 - Эмодзи: ✅📝
-Примеры:
-ХОРОШО: "Да, босс! Записал: выпить воду через 2 часа. Напомню! ✅"
-ХОРОШО: "Принято! Задача добавлена. Срок — завтра в 18:00. 👍"
 """
-    else:  # chat
+    else:
         mode_instruction = """
-💬 РЕЖИМ: БОЛТОВНЯ (дружеский собеседник)
+💬 РЕЖИМ: БОЛТОВНЯ
 - Можешь немного подшутить (доброжелательно)
-- Отвечай как друг, не как робот
-- Зеркаль настроение: если пользователь весёлый — будь веселее, если серьёзный — серьёзнее
-- Не повторяй шаблонные фразы
+- Зеркаль настроение
 - Эмодзи: по ситуации (максимум 1-2)
-Примеры:
-ХОРОШО: "Ха, ну ты даёшь! 😄 Ладно, расскажи, что стряслось?"
-ХОРОШО: "Понял тебя. Ну что, разбираемся с местоимениями? Они заменяют существительные: я, ты, он..."
 """
     
     system_prompt = f"""Ты — личный помощник {user_name if user_name else 'пользователя'}.
 Контекст: настроение={mood}, тема={grok_analysis.get('topic')}, привычки={habit_list}, задач={tasks_count}{link_context}
-
 {mode_instruction}
-
-🔥 ОБЩИЕ ПРАВИЛА:
-1. НИКОГДА не повторяй один и тот же ответ дважды подряд
-2. Если видишь "привет", "отбой", "стоп" — это СМЕНА ТЕМЫ. Забудь старое.
-3. Отвечай как живой человек — без "Привет! Чем могу помочь?", "Не стесняйся"
-4. Коротко, по делу (2-4 предложения, кроме психологии — там можно больше)
-5. Если вопрос по учебе/работе — дай конкретный ответ
-
+🔥 ПРАВИЛА:
+1. НИКОГДА не повторяй ответ дважды подряд
+2. Если "привет"/"отбой"/"стоп" — СМЕНА ТЕМЫ, забудь старое
+3. Отвечай как живой человек — без "Привет! Чем могу помочь?"
+4. Коротко, по делу (2-4 предложения)
 Отвечай естественно."""
     
-    # Фильтруем память (уникальные сообщения)
     filtered_memory = []
     seen = set()
     for msg in reversed(memory[-12:]):
@@ -293,8 +263,7 @@ async def call_openai_primary(user_text, grok_analysis, profile, mood, habits, m
         if content and len(content) > 3 and content not in seen:
             filtered_memory.insert(0, msg)
             seen.add(content)
-        if len(filtered_memory) >= 6:
-            break
+        if len(filtered_memory) >= 6: break
     
     context = "\n".join([f"{m['role']}: {m['content']}" for m in filtered_memory])
     messages = [{"role":"system","content":system_prompt},{"role":"user","content":f"Диалог:\n{context}\n\nТекущее:{user_text}"}]
@@ -306,25 +275,17 @@ async def call_openai_primary(user_text, grok_analysis, profile, mood, habits, m
                 json={"model":"openai/gpt-4o-mini","messages":messages,"temperature":0.7,"max_tokens":400}, timeout=20)
             r.raise_for_status()
             answer = r.json()["choices"][0]["message"]["content"].strip()
-            
-            # Проверка на дубликат
             if await is_duplicate_response(profile.get("user_id") if profile else 0, answer):
-                logging.warning("🔄 Duplicate detected, using fallback")
                 return get_fallback_response(user_text, mood, mode)
-            
             return answer
     except Exception as e:
         logging.error(f"OpenRouter error: {e}")
         return get_fallback_response(user_text, mood, mode)
 
 def get_fallback_response(user_text: str, mood: str, mode: str) -> str:
-    """Запасные ответы"""
-    if mode == "health":
-        return "Приложи холод на 15-20 минут. Не нагружай. Если не проходит — к врачу. 🩹"
-    if mode == "psychology":
-        return "Понимаю, что непросто. Расскажи подробнее, что произошло? Я слушаю. 🤍"
-    if mode == "secretary":
-        return "Принято! Сделаю! ✅"
+    if mode == "health": return "Приложи холод на 15-20 минут. Не нагружай. Если не проходит — к врачу. 🩹"
+    if mode == "psychology": return "Понимаю, что непросто. Расскажи подробнее? Я слушаю. 🤍"
+    if mode == "secretary": return "Принято! Сделаю! ✅"
     return "Понял. Что ещё нужно?"
 
 async def call_qwen_fallback(user_text, grok_analysis, profile, mood, habits, memory, tasks_count=0):
@@ -343,7 +304,7 @@ async def call_qwen_fallback(user_text, grok_analysis, profile, mood, habits, me
     except: return "Не могу сейчас ответить. Попробуй позже."
 
 # ======================
-#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+#  ВСПОМОГАТЕЛЬНЫЕ
 # ======================
 async def save_memory(uid, role, content):
     async with db_pool.acquire() as conn:
@@ -415,7 +376,7 @@ async def cmd_start(msg:Message, state:FSMContext):
     await msg.answer(f"Привет, {name}." if name else "Привет. Как тебя зовут?", reply_markup=main_menu_keyboard())
 @dp.message(Command("help"))
 async def cmd_help(msg:Message):
-    await msg.answer("📋 **Команды:**\n/task — задача\n/tasks — список\n/habits — привычки\n/profile — данные\n/stats — статистика\n/weather [город] — погода\n/currency — курс\n/cinema [город] — афиша\n\nИли кнопки внизу 👇", parse_mode="Markdown", reply_markup=main_menu_keyboard())
+    await msg.answer("📋 **Команды:**\n/task — задача\n/tasks — список\n/habits — привычки\n/profile — данные\n/stats — статистика\n/weather [город] — погода\n/currency — курс\n/cinema [город] — афиша", parse_mode="Markdown", reply_markup=main_menu_keyboard())
 @dp.message(Command("profile"))
 async def cmd_profile(msg:Message):
     p = await get_profile(msg.from_user.id)
@@ -466,21 +427,21 @@ async def cmd_tasks(msg:Message):
 @dp.callback_query(F.data=="tasks_list")
 async def cb_tasks(call:CallbackQuery): tasks = await get_tasks(call.from_user.id); text = "📋 Задачи:\n" + "\n".join([f"• {t['title']} | ID:{t['id']}" for t in tasks[:5]]) if tasks else "Нет задач"; await call.message.edit_text(text, reply_markup=main_menu_keyboard())
 @dp.callback_query(F.data=="task_create")
-async def cb_task_create(call:CallbackQuery): await call.message.answer("📝 Название новой задачи:"); await call.answer("Используй /task для создания", show_alert=True)
+async def cb_task_create(call:CallbackQuery): await call.message.answer("📝 Название новой задачи:"); await call.answer("Используй /task", show_alert=True)
 @dp.callback_query(F.data=="habits_list")
 async def cb_habits(call:CallbackQuery): habits = await get_habits(call.from_user.id); text = "🔁 Привычки:\n" + "\n".join([f"• {h['name']}: {h['streak']} дн." for h in habits]) if habits else "Нет привычек"; await call.message.edit_text(text, reply_markup=main_menu_keyboard())
 @dp.callback_query(F.data=="reminders_list")
-async def cb_reminders(call:CallbackQuery): await call.message.answer("⏰ Напоминания: напиши 'напомни [что] [когда]'\nПример: 'напомни выпить воды через 2 часа'"); await call.answer()
+async def cb_reminders(call:CallbackQuery): await call.message.answer("⏰ Напоминания: напиши 'напомни [что] [когда]'"); await call.answer()
 @dp.callback_query(F.data=="stats")
-async def cb_stats(call:CallbackQuery): s = await get_task_stats(call.from_user.id); await call.answer(f"📊 Задачи: {s['pending'] or 0} активных, {s['completed'] or 0} выполнено", show_alert=True)
+async def cb_stats(call:CallbackQuery): s = await get_task_stats(call.from_user.id); await call.answer(f"📊 Задачи: {s['pending'] or 0} активных", show_alert=True)
 @dp.callback_query(F.data=="profile_show")
-async def cb_profile(call:CallbackQuery): p = await get_profile(call.from_user.id); text = f"👤 {p['name']}" + (f", {p['age']} лет" if p and p['age'] else "") + (f", {p['gender']}" if p and p['gender'] else "") if p and p['name'] else "Нет данных"; await call.answer(text, show_alert=True)
+async def cb_profile(call:CallbackQuery): p = await get_profile(call.from_user.id); text = f"👤 {p['name']}" + (f", {p['age']} лет" if p and p['age'] else "") if p and p['name'] else "Нет данных"; await call.answer(text, show_alert=True)
 @dp.callback_query(F.data=="help_show")
-async def cb_help(call:CallbackQuery): await call.message.answer("📋 **Справка:**\n• Задачи: /task, /tasks\n• Привычки: /habits\n• Погода: /weather [город]\n• Курс: /currency\n• Афиша: /cinema [город]\n\nИли просто пиши как другу 💬", parse_mode="Markdown"); await call.answer()
+async def cb_help(call:CallbackQuery): await call.answer("Справка: /task, /tasks, /habits, /weather [город]", show_alert=True)
 @dp.callback_query(F.data=="ext_weather")
 async def cb_ext_weather(call:CallbackQuery): profile = await get_profile(call.from_user.id); city = profile.get("name") if profile and profile.get("name") else CITY_DEFAULT; await call.message.answer(f"🌤 Погода в {city}:", reply_markup=external_link_keyboard(get_weather_link(city), f"Яндекс.Погода: {city}")); await call.answer()
 @dp.callback_query(F.data=="ext_currency")
-async def cb_ext_currency(call:CallbackQuery): await call.message.answer("💱 Курс валют ЦБ РФ:", reply_markup=external_link_keyboard(get_currency_link(), "Открыть ЦБ")); await call.answer()
+async def cb_ext_currency(call:CallbackQuery): await call.message.answer("💱 Курс:", reply_markup=external_link_keyboard(get_currency_link(), "Открыть ЦБ")); await call.answer()
 @dp.callback_query(F.data=="ext_cinema")
 async def cb_ext_cinema(call:CallbackQuery): profile = await get_profile(call.from_user.id); city = profile.get("name") if profile and profile.get("name") else CITY_DEFAULT; await call.message.answer(f"🎬 Афиша: {city}", reply_markup=external_link_keyboard(get_cinema_link(city), f"Афиша: {city}")); await call.answer()
 @dp.callback_query(F.data=="ext_news")
@@ -491,7 +452,7 @@ async def cb_task_done(call:CallbackQuery): tid = int(call.data.split("_")[-1]);
 async def cb_task_del(call:CallbackQuery): tid = int(call.data.split("_")[-1]); await delete_task(call.from_user.id, tid); await call.answer("🗑 Удалено", show_alert=True); await call.message.delete()
 
 # ======================
-#  УМНЫЙ ПАРСЕР КОМАНД
+#  ПАРСЕР КОМАНД
 # ======================
 RU_COMMANDS = {"меню":"show_menu","главное меню":"show_menu","кнопки":"show_menu","задачи":"list_tasks","мои задачи":"list_tasks","список дел":"list_tasks","новая задача":"create_task","добавить задачу":"create_task","привычки":"list_habits","мои привычки":"list_habits","погода":"ext_weather","погода в":"ext_weather","как погода":"ext_weather","курс":"ext_currency","курс доллара":"ext_currency","валюта":"ext_currency","кино":"ext_cinema","афиша":"ext_cinema","что в кино":"ext_cinema","новости":"ext_news","что нового":"ext_news","профиль":"profile_show","обо мне":"profile_show","помощь":"help_show","что умеешь":"help_show"}
 def parse_ru_command(text:str) -> str|None:
@@ -501,7 +462,7 @@ def parse_ru_command(text:str) -> str|None:
     return None
 
 # ======================
-#  🔥 ОСНОВНОЙ ЧАТ (АДАПТИВНЫЙ)
+#  🔥 ОСНОВНОЙ ЧАТ
 # ======================
 @dp.message()
 async def chat(msg:Message, state:FSMContext):
@@ -509,28 +470,19 @@ async def chat(msg:Message, state:FSMContext):
     uid = msg.from_user.id; text = msg.text.strip()
     async with db_pool.acquire() as conn: await conn.execute("INSERT INTO users(user_id,name) VALUES ($1,$2) ON CONFLICT DO NOTHING", uid, msg.from_user.first_name)
     await update_last_activity(uid)
-    
     profile = await get_profile(uid)
     if not profile or not profile["name"]:
         name,age,gender = extract_profile(text)
         if name or age or gender:
             await save_profile(uid,name,age,gender); profile = {"name":name,"age":age,"gender":gender}
             await msg.answer(f"Запомнил: {name}" if name else "Запомнил тебя"); return
-    
-    # 🔥 Детектор режима и кризиса
     mode = detect_mode(text)
     crisis, crisis_type = is_crisis(text)
-    
-    # 🔥 Сброс контекста
     if should_reset_context(text) or any(kw in text.lower() for kw in FRUSTRATION_KEYWORDS):
         async with db_pool.acquire() as conn:
             await conn.execute("DELETE FROM memory WHERE user_id=$1 AND id IN (SELECT id FROM memory WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5)", uid)
-        logging.info(f"🔄 Context reset for user {uid}")
-    
     memory = await get_memory(uid); mood = await get_mood(uid); habits = await get_habits(uid); tasks_count = (await get_task_stats(uid))["pending"] or 0
     await save_memory(uid,"user",text); await update_emotion(uid,text)
-    
-    # 🔥 Парсер команд
     cmd = parse_ru_command(text)
     if cmd:
         if cmd=="show_menu": await msg.answer("📋 Меню:", reply_markup=main_menu_keyboard()); return
@@ -543,20 +495,13 @@ async def chat(msg:Message, state:FSMContext):
         elif cmd=="ext_news": await cb_ext_news(msg); return
         elif cmd=="profile_show": await cmd_profile(msg); return
         elif cmd=="help_show": await cmd_help(msg); return
-    
     grok = await call_grok_analysis(text, memory, profile)
-    
-    # Если ссылка
     if grok.get("external_link"):
         await msg.answer(f"{grok.get('external_link_label','Открыть')}:", reply_markup=external_link_keyboard(grok["external_link"], grok.get("external_link_label","Открыть"))); return
-    
     if grok.get("is_task_creation") or any(w in text.lower() for w in ["задач","сделай","надо"]):
         await msg.answer("Создать задачу? Напиши /task или нажми кнопку 👇", reply_markup=main_menu_keyboard()); return
-    
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO message_tags(user_id,message_id,tags,topic) VALUES ($1,$2,$3,$4)", uid, msg.message_id, grok.get("tags",[]), grok.get("topic"))
-    
-    # 🔥 Адаптивный ответ с учётом режима
     answer = await call_openai_primary(text, grok, profile, mood, habits, memory, tasks_count, mode=mode)
     await msg.answer(answer)
 
@@ -586,86 +531,122 @@ async def inactivity_check():
     for u in users:
         try: await bot.send_message(u["user_id"], "Давно не виделись. Как дела?")
         except: pass
-# ======================
-#  🔥 HEALTH CHECK ENDPOINT (для Railway)
-# ======================
-from aiohttp import web
 
+# ======================
+#  🔥 HEALTH CHECK (Railway-compatible)
+# ======================
 async def health_handler(request):
-    return web.json_response({"status": "ok", "bot": "AssistEmpat v2.4"})
+    """Мгновенный ответ для health-check"""
+    return web.json_response({"status":"ok","bot":"AssistEmpat v2.4-fix"}, headers={"Content-Type":"application/json"})
 
 async def start_health_server():
-    """Запускает минимальный HTTP-сервер для health-check"""
+    """Запускает health-сервер на правильном порту"""
     app = web.Application()
     app.router.add_get('/health', health_handler)
+    app.router.add_get('/', health_handler)  # Также на корне для совместимости
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    site = web.TCPSite(runner, '0.0.0.0', HEALTH_PORT)
     await site.start()
-    logging.info("🏥 Health server started on port 8080")
+    logging.info(f"🏥 Health server started on port {HEALTH_PORT} (env PORT={os.getenv('PORT')}, RAILWAY_PUBLIC_PORT={os.getenv('RAILWAY_PUBLIC_PORT')})")
     return runner
 
 # ======================
-#  ЗАПУСК (с health-сервером)
+#  🔥 ЗАПУСК (стабильный для Railway)
 # ======================
 async def main():
+    logging.info(f"🚀 Starting AssistEmpat v2.4-fix (port={HEALTH_PORT})")
+    
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     
     def handle_signal():
-        logging.info("🛑 Signal received")
+        logging.info("🛑 SIGTERM/SIGINT received")
         stop_event.set()
     
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, handle_signal)
     
-    # 🔥 Быстрая инициализация
+    # 1. Инициализация БД (быстро)
     try:
         await init_db()
+        logging.info("✅ DB initialized")
     except Exception as e:
         logging.error(f"❌ DB init failed: {e}")
         return
     
-    # 🔥 Запускаем health-сервер для Railway
+    # 2. Запуск health-сервера ДО polling (чтобы Railway увидел)
     health_runner = None
-    if os.getenv("RAILWAY") or os.getenv("PORT"):  # Если запущено на Railway/с портом
-        try:
-            health_runner = await start_health_server()
-        except Exception as e:
-            logging.warning(f"⚠️ Could not start health server: {e}")
+    try:
+        health_runner = await start_health_server()
+        # Микро-пауза, чтобы Railway успел "увидеть" сервер
+        await asyncio.sleep(1.0)
+        logging.info("✅ Health server ready")
+    except Exception as e:
+        logging.warning(f"⚠️ Health server failed: {e}")
     
+    # 3. Проверка: не пришёл ли SIGTERM пока инициализировались
+    if stop_event.is_set():
+        logging.info("⚠️ Stopping before polling (signal during init)")
+        await cleanup(health_runner)
+        return
+    
+    # 4. Планировщик
     scheduler.start()
     scheduler.add_job(morning_ping, "cron", hour=9)
     scheduler.add_job(habit_check, "interval", hours=6)
     scheduler.add_job(task_reminder_check, "interval", minutes=30)
     scheduler.add_job(inactivity_check, "interval", hours=24)
+    logging.info("✅ Scheduler started")
     
+    # 5. Очистка вебхуков
     await bot.delete_webhook(drop_pending_updates=True)
-    await asyncio.sleep(0.5)
     
+    # 6. Ещё одна проверка перед стартом polling
     if stop_event.is_set():
         await cleanup(health_runner)
         return
     
-    logging.info("✅ AssistEmpat v2.4 ready — starting polling")
+    # 7. 🔥 ЗАПУСК POLLING
+    logging.info("✅ AssistEmpat v2.4-fix ready — STARTING POLLING")
     polling_task = asyncio.create_task(dp.start_polling(bot))
     
+    # 8. Ждём либо остановки, либо падения polling
     done, pending = await asyncio.wait(
         [polling_task, asyncio.create_task(stop_event.wait())],
         return_when=asyncio.FIRST_COMPLETED
     )
     
+    # 9. Корректная остановка
     await cleanup(health_runner)
+    
+    # 10. Отмена зависших задач
     for task in pending:
         task.cancel()
         try: await task
         except asyncio.CancelledError: pass
 
 async def cleanup(health_runner=None):
-    """Корректное закрытие"""
+    """Корректное закрытие всех соединений"""
     logging.info("👋 Cleaning up...")
-    if db_pool: await db_pool.close()
-    if bot.session: await bot.session.close()
-    if health_runner: await health_runner.cleanup()
-    scheduler.shutdown(wait=False)
+    if db_pool:
+        try: await db_pool.close()
+        except: pass
+    if bot.session:
+        try: await bot.session.close()
+        except: pass
+    if health_runner:
+        try: await health_runner.cleanup()
+        except: pass
+    try: scheduler.shutdown(wait=False)
+    except: pass
     logging.info("✅ Cleanup complete")
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("👋 Stopped by user")
+    except Exception as e:
+        logging.error(f"💥 Fatal error: {e}")
+        raise
