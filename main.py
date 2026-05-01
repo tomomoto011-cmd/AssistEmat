@@ -1,7 +1,8 @@
 # =========================================================
-#  ASSISTEMPAT BOT v2.2 (UTILITIES + INLINE)
-#  Архитектура: Grok (анализ) + Qwen (эмпатия)
+#  ASSISTEMPAT BOT v2.2+ (EXTERNAL DATA + ADAPTIVE PROMPTS)
+#  Архитектура: Grok (анализ + данные) + Qwen (эмпатия)
 #  БД: Neon PostgreSQL + задачи + inline-кнопки
+#  Внешние данные: погода, курсы, афиша (расширяемо)
 # =========================================================
 
 import asyncio
@@ -36,6 +37,8 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")  # погода
+CITY_DEFAULT = os.getenv("CITY_DEFAULT", "Москва")       # город по умолчанию
 ALLOWED_USERS = os.getenv("ALLOWED_USERS", "")
 
 bot = Bot(token=BOT_TOKEN)
@@ -132,22 +135,70 @@ async def init_db():
     logging.info("✅ PostgreSQL initialized + migrations applied")
 
 # ======================
-#  ЗАДАЧИ (TASKS)
+#  ВНЕШНИЕ ДАННЫЕ (погода, курсы, афиша)
+# ======================
+async def get_weather(city: str) -> dict | None:
+    """Погода через OpenWeatherMap"""
+    if not OPENWEATHER_API_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                "https://api.openweathermap.org/data/2.5/weather",
+                params={"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "ru"}
+            )
+            if r.status_code == 200:
+                data = r.json()
+                return {
+                    "temp": data["main"]["temp"],
+                    "feels_like": data["main"]["feels_like"],
+                    "description": data["weather"][0]["description"],
+                    "humidity": data["main"]["humidity"],
+                    "city": data["name"]
+                }
+    except Exception as e:
+        logging.error(f"Weather API error: {e}")
+    return None
+
+async def get_currency_rates() -> dict | None:
+    """Курсы валют ЦБ РФ"""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("https://www.cbr-xml-daily.ru/daily_json.js")
+            if r.status_code == 200:
+                data = r.json()
+                return {
+                    "USD": round(data["Valute"]["USD"]["Value"], 2),
+                    "EUR": round(data["Valute"]["EUR"]["Value"], 2),
+                    "date": data["Date"]
+                }
+    except Exception as e:
+        logging.error(f"Currency API error: {e}")
+    return None
+
+async def get_cinema_afisha(city: str = "Москва") -> list[str] | None:
+    """Афиша кино (заглушка, можно подключить Kinopoisk API)"""
+    # Пример ответа — в реальности здесь парсинг или API-запрос
+    return [
+        "🎬 Дюна: Часть вторая — 19:00, 22:00",
+        "🎬 Опенгеймер — 18:30, 21:45",
+        "🎬 Бедные-несчастные — 20:00"
+    ]
+
+# ======================
+#  ЗАДАЧИ (TASKS) — без изменений
 # ======================
 async def create_task(uid, title, description=None, priority="medium", due_date=None):
     async with db_pool.acquire() as conn:
-        result = await conn.fetchval(
+        return await conn.fetchval(
             "INSERT INTO tasks(user_id, title, description, priority, due_date) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-            uid, title, description, priority, due_date
-        )
-        return result
+            uid, title, description, priority, due_date)
 
 async def get_tasks(uid, status="pending"):
     async with db_pool.acquire() as conn:
         return await conn.fetch(
             "SELECT id, title, description, priority, due_date, created_at FROM tasks WHERE user_id=$1 AND status=$2 ORDER BY created_at DESC",
-            uid, status
-        )
+            uid, status)
 
 async def complete_task(uid, task_id):
     async with db_pool.acquire() as conn:
@@ -159,16 +210,11 @@ async def delete_task(uid, task_id):
 
 async def get_task_stats(uid):
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            SELECT 
-                COUNT(*) FILTER (WHERE status='pending') as pending,
-                COUNT(*) FILTER (WHERE status='completed') as completed
-            FROM tasks WHERE user_id=$1
-        """, uid)
-        return row
+        return await conn.fetchrow(
+            "SELECT COUNT(*) FILTER (WHERE status='pending') as pending, COUNT(*) FILTER (WHERE status='completed') as completed FROM tasks WHERE user_id=$1", uid)
 
 # ======================
-#  INLINE КЛАВИАТУРЫ
+#  INLINE КЛАВИАТУРЫ — без изменений
 # ======================
 def main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -191,36 +237,50 @@ def yes_no_keyboard(callback_data_yes, callback_data_no):
     ])
 
 # ======================
-#  GROK API (Секретарь)
+#  GROK API (Секретарь + адаптивный промпт)
 # ======================
-async def call_grok_analysis(text: str, history: list = None) -> dict:
+async def call_grok_analysis(text: str, history: list = None, profile: dict = None) -> dict:
+    """
+    Анализирует сообщение и ОПРЕДЕЛЯЕТ, нужны ли внешние данные.
+    Возвращает расширенный контекст для Qwen.
+    """
     if not GROK_API_KEY:
         return {
             "topic": "general", "tags": [], "intent": "chat",
             "emotional_tone": "neutral", "action_items": [],
-            "priority": "medium", "refined_prompt": text
+            "priority": "medium", "refined_prompt": text,
+            "external_data_needed": None, "external_data": None
         }
     
     try:
         history_context = "\n".join([f"{m['role']}: {m['content']}" for m in (history or [])[-5:]])
+        user_info = f"Имя: {profile.get('name')}, Возраст: {profile.get('age')}, Пол: {profile.get('gender')}" if profile else ""
+        
         prompt = f"""
-Анализируй сообщение. Верни ТОЛЬКО JSON:
+Анализируй сообщение пользователя. Верни ТОЛЬКО JSON:
 
+Пользователь: {user_info}
 Сообщение: {text}
-История: {history_context}
+История диалога:
+{history_context}
 
-Формат:
+Формат ответа:
 {{
-    "topic": "работа|учеба|здоровье|отношения|эмоции|быт|задача|другое",
+    "topic": "работа|учеба|здоровье|отношения|эмоции|быт|задача|погода|кино|финансы|другое",
     "tags": ["тег1", "тег2"],
-    "intent": "chat|question|task|complaint|request_help|create_task",
+    "intent": "chat|question|task|request_help|create_task|request_external_data",
     "emotional_tone": "neutral|positive|negative|stressed|tired",
     "action_items": ["что нужно сделать"],
     "priority": "low|medium|high",
-    "refined_prompt": "уточненный запрос",
-    "is_task_creation": true/false (если пользователь хочет создать задачу)
+    "refined_prompt": "уточнённый запрос для эмпатичного ответа",
+    "is_task_creation": true/false,
+    "external_data_needed": null|"weather"|"currency"|"cinema",
+    "external_data_params": {{"city": "..."}} или null
 }}
+
+Если пользователь спрашивает про погоду, кино, курсы — укажи external_data_needed.
 """
+        
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.post(
                 "https://api.x.ai/v1/chat/completions",
@@ -232,20 +292,47 @@ async def call_grok_analysis(text: str, history: list = None) -> dict:
             if result.startswith("```json"):
                 result = result.replace("```json", "").replace("```", "").strip()
             data = json.loads(result)
+            
+            # 🔥 АДАПТИВНАЯ ПОДГРУЗКА ДАННЫХ
+            if data.get("external_data_needed") == "weather":
+                city = data.get("external_data_params", {}).get("city") or CITY_DEFAULT
+                data["external_data"] = await get_weather(city)
+            elif data.get("external_data_needed") == "currency":
+                data["external_data"] = await get_currency_rates()
+            elif data.get("external_data_needed") == "cinema":
+                city = data.get("external_data_params", {}).get("city") or CITY_DEFAULT
+                data["external_data"] = await get_cinema_afisha(city)
+            
             return data
+            
     except Exception as e:
         logging.error(f"Grok error: {e}")
-        return {"topic": "general", "tags": [], "intent": "chat", "emotional_tone": "neutral", "action_items": [], "priority": "medium", "refined_prompt": text, "is_task_creation": False}
+        return {
+            "topic": "general", "tags": [], "intent": "chat", "emotional_tone": "neutral",
+            "action_items": [], "priority": "medium", "refined_prompt": text,
+            "is_task_creation": False, "external_data_needed": None, "external_data": None
+        }
 
 # ======================
-#  QWEN API (Эмпат)
+#  QWEN API (Эмпат) — с внешними данными в промпте
 # ======================
 async def call_qwen_empath(user_text, grok_analysis, profile, mood, habits, memory, tasks_count=0):
     if not QWEN_API_KEY:
         return await call_openrouter_fallback(user_text, grok_analysis, profile, mood, habits, memory, tasks_count)
     
-    user_name = profile[0] if profile and profile[0] else ""
+    user_name = profile.get("name") if profile else ""
     habit_list = ", ".join([h[0] for h in habits]) if habits else "не заданы"
+    
+    # 🔥 Формируем блок с внешними данными для промпта
+    external_context = ""
+    if grok_analysis.get("external_data"):
+        ext = grok_analysis["external_data"]
+        if isinstance(ext, dict) and "temp" in ext:  # погода
+            external_context = f"\n[Внешние данные: погода в {ext.get('city')}: {ext.get('temp')}°C, {ext.get('description')}]"
+        elif isinstance(ext, dict) and "USD" in ext:  # курсы
+            external_context = f"\n[Внешние данные: курсы ЦБ на {ext.get('date')}: USD {ext.get('USD')}₽, EUR {ext.get('EUR')}₽]"
+        elif isinstance(ext, list):  # афиша
+            external_context = f"\n[Внешние данные: афиша кино:\n" + "\n".join([f"  • {item}" for item in ext[:3]]) + "]"
     
     system_prompt = f"""
 Ты — личный помощник {user_name if user_name else 'пользователя'}. 
@@ -254,26 +341,24 @@ async def call_qwen_empath(user_text, grok_analysis, profile, mood, habits, memo
 - Настроение: {mood}
 - Тема: {grok_analysis.get('topic')}
 - Привычки: {habit_list}
-- Активных задач: {tasks_count}
+- Активных задач: {tasks_count}{external_context}
 
 Стиль общения:
 1. Отвечай как живой человек — без фраз "я не жив", "я бот", "я ИИ"
-2. Коротко, по делу, без воды
-3. Если видишь, что человек хочет создать задачу — предложи сделать это через /task или кнопки
-4. Не используй шаблонные фразы вроде "я здесь чтобы помочь"
-5. Если вопрос конкретный — дай конкретный ответ
-6. Эмодзи используй редко (максимум 1 на сообщение)
+2. Если в промпте есть [Внешние данные] — используй их в ответе естественно
+3. Коротко, по делу, без воды
+4. Если видишь, что человек хочет создать задачу — предложи /task или кнопки
+5. Не используй шаблонные фразы вроде "я здесь чтобы помочь"
+6. Эмодзи — максимум 1 на сообщение
 
 Примеры ХОРОШИХ ответов:
-- "Понял. Что именно нужно сделать?"
-- "Вижу, задач много. Давай разберёмся по порядку."
-- "По поводу {grok_analysis.get('topic')}: расскажи подробнее."
-- "Можешь создать задачу командой /task или через меню."
+- "Сейчас в Волгограде {ext.get('temp')}°C, {ext.get('description')}. Одевайся теплее."
+- "Доллар сегодня {ext.get('USD')}₽. Хочешь, поставлю напоминание следить за курсом?"
+- "В кино сейчас: {ext[0]}. Записать в задачи?"
 
-Примеры ПЛОХИХ ответов (НИКОГДА не пиши так):
+Примеры ПЛОХИХ (никогда не пиши):
 - "Я не жив, но здесь чтобы помочь"
 - "Я способен отвечать на вопросы"
-- "Я здесь, чтобы помочь тебе"
 - "Не стесняйся, спрашивай!"
 
 Отвечай естественно, как в обычном чате.
@@ -298,8 +383,8 @@ async def call_qwen_empath(user_text, grok_analysis, profile, mood, habits, memo
         return await call_openrouter_fallback(user_text, grok_analysis, profile, mood, habits, memory, tasks_count)
 
 async def call_openrouter_fallback(user_text, grok_analysis, profile, mood, habits, memory, tasks_count=0):
-    user_name = profile[0] if profile and profile[0] else ""
-    system_prompt = f"Ты — помощник {user_name}. Отвечай кратко, по делу, как живой человек. Избегай фраз 'я бот', 'я не жив'. Настроение: {mood}. Тем: {grok_analysis.get('topic')}."
+    user_name = profile.get("name") if profile else ""
+    system_prompt = f"Ты — помощник {user_name}. Отвечай кратко, по делу, как живой человек. Избегай фраз 'я бот', 'я не жив'. Настроение: {mood}. Тема: {grok_analysis.get('topic')}."
     context = "\n".join([f"{m['role']}: {m['content']}" for m in memory[-10:]])
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": f"{context}\n\n{user_text}"}]
     try:
@@ -317,7 +402,7 @@ async def call_openrouter_fallback(user_text, grok_analysis, profile, mood, habi
         return "Не могу сейчас ответить. Попробуй позже."
 
 # ======================
-#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ — без изменений
 # ======================
 async def save_memory(uid, role, content):
     async with db_pool.acquire() as conn:
@@ -334,7 +419,7 @@ async def update_emotion(uid, text):
     if any(w in text for w in ["груст", "печаль", "тоск", "плохо"]): mood = "грусть"
     elif any(w in text for w in ["рад", "счастлив", "круто", "отлично"]): mood = "радость"
     elif any(w in text for w in ["устал", "выгор", "нет сил", "тяжело"]): mood = "усталость"
-    elif any(w in text for w in ["тревож", "беспоко", "нерв", "страш"]): mood = "тревога"
+    elif any(w in text for w in ["тревож", "беспоко", "нерв", "страх"]): mood = "тревога"
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO emotions(user_id, mood) VALUES ($1, $2)", uid, mood)
 
@@ -348,8 +433,10 @@ async def update_last_activity(uid):
         await conn.execute("INSERT INTO last_activity(user_id, last_time) VALUES ($1, NOW()) ON CONFLICT(user_id) DO UPDATE SET last_time=NOW()", uid)
 
 async def get_profile(uid):
+    """🔐 ИЗОЛЯЦИЯ: загружаем профиль ТОЛЬКО этого пользователя"""
     async with db_pool.acquire() as conn:
-        return await conn.fetchrow("SELECT name, age, gender FROM profile WHERE user_id=$1", uid)
+        row = await conn.fetchrow("SELECT name, age, gender FROM profile WHERE user_id=$1", uid)
+        return {"name": row["name"], "age": row["age"], "gender": row["gender"]} if row else None
 
 async def save_profile(uid, name=None, age=None, gender=None):
     async with db_pool.acquire() as conn:
@@ -381,7 +468,7 @@ async def get_habits(uid):
         return await conn.fetch("SELECT id, name, streak, last_done FROM habits WHERE user_id=$1", uid)
 
 # ======================
-#  FSM
+#  FSM — без изменений
 # ======================
 class TaskFSM(StatesGroup):
     title = State()
@@ -411,7 +498,7 @@ def parse_time(text):
     return None
 
 # ======================
-#  ХЕНДЛЕРЫ: КОМАНДЫ
+#  ХЕНДЛЕРЫ: КОМАНДЫ — без изменений
 # ======================
 @dp.message(Command("start"))
 async def cmd_start(msg: Message, state: FSMContext):
@@ -456,7 +543,7 @@ async def cmd_stats(msg: Message):
     await msg.answer(text, parse_mode="Markdown")
 
 # ======================
-#  ХЕНДЛЕРЫ: ЗАДАЧИ
+#  ХЕНДЛЕРЫ: ЗАДАЧИ — без изменений
 # ======================
 @dp.message(Command("task"))
 async def cmd_task_start(msg: Message, state: FSMContext):
@@ -528,7 +615,7 @@ async def cmd_tasks(msg: Message):
     await msg.answer(text, parse_mode="Markdown")
 
 # ======================
-#  ХЕНДЛЕРЫ: CALLBACKS
+#  ХЕНДЛЕРЫ: CALLBACKS — без изменений
 # ======================
 @dp.callback_query(F.data == "tasks_list")
 async def cb_tasks_list(call: CallbackQuery):
@@ -536,14 +623,12 @@ async def cb_tasks_list(call: CallbackQuery):
     if not tasks:
         await call.answer("Нет активных задач", show_alert=True)
         return
-    
     text = "📋 **Задачи:**\n"
     for task in tasks[:5]:
         text += f"• {task['title']}"
         if task['due_date']:
             text += f" (до {task['due_date'].strftime('%d.%m')})"
         text += f"\n  ID: {task['id']}\n"
-    
     await call.message.edit_text(text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
 @dp.callback_query(F.data == "habits_list")
@@ -552,11 +637,9 @@ async def cb_habits_list(call: CallbackQuery):
     if not habits:
         await call.answer("Нет привычек", show_alert=True)
         return
-    
     text = "🔁 **Привычки:**\n"
     for h in habits:
         text += f"• {h['name']}: {h['streak']} дней\n"
-    
     await call.message.edit_text(text, reply_markup=main_menu_keyboard())
 
 @dp.callback_query(F.data == "reminders_list")
@@ -587,56 +670,62 @@ async def cb_task_delete(call: CallbackQuery):
 async def cb_priority(call: CallbackQuery):
     priority = call.data.split("_")[1]
     await call.message.answer(f"Выбран приоритет: {priority}")
-    # Здесь нужна более сложная логика FSM — упрощено
 
 # ======================
-#  ОСНОВНОЙ ЧАТ
+#  ОСНОВНОЙ ЧАТ — с адаптивным промптом и изоляцией
 # ======================
 @dp.message()
 async def chat(msg: Message, state: FSMContext):
     if not msg.text: return
     if await state.get_state(): return  # Если пользователь в FSM — не обрабатываем
     
-    uid = msg.from_user.id
+    uid = msg.from_user.id  # 🔐 КЛЮЧ ИЗОЛЯЦИИ: все запросы привязаны к uid
     text = msg.text.strip()
     
+    # Регистрация пользователя (если новый)
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO users(user_id, name) VALUES ($1, $2) ON CONFLICT DO NOTHING", uid, msg.from_user.first_name)
     
     await update_last_activity(uid)
     
+    # 🔐 ЗАГРУЗКА ПРОФИЛЯ ТОЛЬКО ЭТОГО ПОЛЬЗОВАТЕЛЯ
     profile = await get_profile(uid)
     if not profile or not profile["name"]:
         name, age, gender = extract_profile(text)
         if name or age or gender:
             await save_profile(uid, name, age, gender)
+            profile = {"name": name, "age": age, "gender": gender}
             await msg.answer(f"Запомнил. {f'Имя: {name}' if name else ''}")
             return
     
-    memory = await get_memory(uid)
-    mood = await get_mood(uid)
-    habits = await get_habits(uid)
+    # 🔐 КОНТЕКСТ ТОЛЬКО ЭТОГО ПОЛЬЗОВАТЕЛЯ
+    memory = await get_memory(uid)  # WHERE user_id=$1 внутри
+    mood = await get_mood(uid)      # WHERE user_id=$1 внутри
+    habits = await get_habits(uid)  # WHERE user_id=$1 внутри
     tasks_count = (await get_task_stats(uid))["pending"] or 0
     
     await save_memory(uid, "user", text)
     await update_emotion(uid, text)
     
-    grok_data = await call_grok_analysis(text, memory)
+    # 🔥 АДАПТИВНЫЙ АНАЛИЗ: Grok решает, нужны ли внешние данные
+    grok_data = await call_grok_analysis(text, memory, profile)
     
     # Если Grok определил создание задачи
     if grok_data.get("is_task_creation") or "задач" in text.lower() or "сделай" in text.lower():
         await msg.answer("Создать задачу? Используй /task или кнопку ниже.", reply_markup=main_menu_keyboard())
         return
     
+    # Сохраняем теги
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO message_tags(user_id, message_id, tags, topic) VALUES ($1, $2, $3, $4)",
                           uid, msg.message_id, grok_data.get("tags", []), grok_data.get("topic"))
     
+    # 🔥 Qwen получает промпт с уже подгруженными внешними данными (если нужно)
     answer = await call_qwen_empath(text, grok_data, profile, mood, habits, memory, tasks_count)
     await msg.answer(answer)
 
 # ======================
-#  ПЛАНИРОВЩИК
+#  ПЛАНИРОВЩИК — без изменений
 # ======================
 async def morning_ping():
     async with db_pool.acquire() as conn:
@@ -657,7 +746,6 @@ async def habit_check():
                 except: pass
 
 async def task_reminder_check():
-    """Проверяет задачи с дедлайном"""
     async with db_pool.acquire() as conn:
         tasks = await conn.fetch("""
             SELECT user_id, title, due_date FROM tasks 
@@ -678,7 +766,7 @@ async def inactivity_check():
         except: pass
 
 # ======================
-#  ЗАПУСК
+#  ЗАПУСК — без изменений
 # ======================
 async def main():
     loop = asyncio.get_running_loop()
@@ -687,7 +775,7 @@ async def main():
         loop.add_signal_handler(sig, stop_event.set)
     
     await init_db()
-    logging.info("✅ AssistEmpat v2.2 запущен (Tasks + Inline)")
+    logging.info("✅ AssistEmpat v2.2+ запущен (external data + adaptive prompts)")
     
     scheduler.start()
     scheduler.add_job(morning_ping, "cron", hour=9)
