@@ -1,7 +1,6 @@
 # =========================================================
-# 🧭 НАВИГАЦИЯ ПО ФАЙЛУ (CTRL+F)
+#  НАВИГАЦИЯ ПО ФАЙЛУ (CTRL+F)
 # =========================================================
-# [LOCK]         → Redis / анти-дубликаты
 # [DB]           → база данных
 # [MEMORY]       → память + эмоции
 # [HABITS]       → привычки
@@ -17,26 +16,18 @@ import logging
 import os
 import re
 import random
+import signal
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 
 import aiosqlite
 import httpx
-
-# Redis: пробуем импортировать, но не падаем, если не установлен
-try:
-    import redis.asyncio as redis
-    REDIS_AVAILABLE = True
-except ImportError:
-    REDIS_AVAILABLE = False
-    logging.warning("⚠️ redis-py не установлен — работа без Redis")
-
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -45,7 +36,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-REDIS_URL = os.getenv("REDIS_URL")
 ALLOWED_USERS = os.getenv("ALLOWED_USERS", "")
 
 bot = Bot(token=BOT_TOKEN)
@@ -53,45 +43,6 @@ dp = Dispatcher(storage=MemoryStorage())
 
 DB_PATH = "bot.db"
 scheduler = AsyncIOScheduler(timezone=timezone.utc)
-
-# ======================
-# 🔥 REDIS LOCK
-# ======================
-IS_MAIN = False
-redis_client = None
-
-async def acquire_lock():
-    global IS_MAIN, redis_client
-    if not REDIS_URL or not REDIS_AVAILABLE:
-        IS_MAIN = True
-        logging.warning("⚠️ NO REDIS → RUNNING AS MAIN")
-        return
-    try:
-        redis_client = redis.from_url(REDIS_URL)
-        lock = await redis_client.set("bot_lock", os.getpid(), ex=60, nx=True)
-        logging.info(f"LOCK OWNER: {os.getpid()}")
-        if lock:
-            IS_MAIN = True
-            logging.info("✅ MAIN INSTANCE (lock acquired)")
-        else:
-            ttl = await redis_client.ttl("bot_lock")
-            if ttl == -2:
-                IS_MAIN = True
-                logging.warning("⚠️ LOCK LOST → FORCING MAIN")
-            else:
-                logging.warning(f"⛔ SECONDARY INSTANCE (ttl={ttl})")
-    except Exception as e:
-        IS_MAIN = True
-        logging.error(f"🚨 REDIS FAIL → RUN AS MAIN: {e}")
-
-async def keep_lock_alive():
-    while True:
-        try:
-            if IS_MAIN and redis_client:
-                await redis_client.expire("bot_lock", 60)
-        except Exception as e:
-            logging.error(f"Lock refresh error: {e}")
-        await asyncio.sleep(30)
 
 # ======================
 # 🛑 АНТИ-ДУБЛЬ
@@ -476,7 +427,7 @@ async def cmd_start(msg: Message, state: FSMContext):
 @dp.message(Command("help"))
 async def cmd_help(msg: Message):
     help_text = """
-🤍 **AssistEmpat — твой личный помощник**
+ **AssistEmpat — твой личный помощник**
 
 📋 **Что я умею:**
 • 🗣 Слушаю и поддерживаю в трудную минуту
@@ -489,7 +440,7 @@ async def cmd_help(msg: Message):
 • Просто пиши как другу — я пойму
 • "напомни выпить воды через 2 часа" ⏰
 • "я устал, не могу уснуть" — помогу разобраться
-• "добавь привычку: зарядка по утрам" 🔁
+• "добавь привычку: зарядка по утрам" 
 
 🔧 **Команды:**
 • `/start` — начать заново
@@ -505,7 +456,7 @@ async def cmd_profile(msg: Message):
     profile = await get_profile(msg.from_user.id)
     if profile and profile[0]:
         name, age, gender = profile
-        info = f"👤 **Твой профиль**\n"
+        info = f" **Твой профиль**\n"
         info += f"Имя: {name}\n"
         info += f"Возраст: {age}\n" if age else ""
         info += f"Пол: {'мужской' if gender == 'male' else 'женский'}\n" if gender else ""
@@ -523,14 +474,12 @@ async def chat(msg: Message, state: FSMContext):
     uid = msg.from_user.id
     await update_last_activity(uid)
     
-    # Регистрация пользователя в БД
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT OR IGNORE INTO users VALUES (?, ?)", (uid, msg.from_user.first_name))
         await db.commit()
     
     text = msg.text.lower().strip()
     
-    # 🔥 Распознавание профиля при первом контакте
     profile = await get_profile(uid)
     if not profile or not profile[0]:
         name, age, gender = extract_profile(msg.text)
@@ -540,46 +489,34 @@ async def chat(msg: Message, state: FSMContext):
             await msg.answer(greeting)
             return
     
-    # 🔥 Обработка запросов про заметки
     if "замет" in text or "запиш" in text or "сохрани" in text:
-        if "напомн" not in text:  # чтобы не конфликтовало с напоминаниями
-            await msg.answer("Запишу 📝 Что сохранить?")
-            # Можно добавить сохранение в таблицу notes
+        if "напомн" not in text:
+            await msg.answer("Запишу  Что сохранить?")
             return
     
-    # 🔥 Обработка запросов про напоминания
     if "напомн" in text and "когда" not in text and "через" not in text and "в " not in text:
         await msg.answer("О чём напомнить и когда? Например:\n• 'напомни выпить воды через 2 часа' 💧\n• 'напомни позвонить завтра в 18:00' 📞")
         return
     
-    # Загрузка привычек для контекста
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT name FROM habits WHERE user_id=?", (uid,))
         habits = await cur.fetchall()
     
+    text_for_ai = msg.text
     if habits:
         habit_list = ", ".join([h[0] for h in habits])
         text_for_ai = msg.text + f"\n(его привычки: {habit_list})"
-    else:
-        text_for_ai = msg.text
     
-    # Сохранение памяти и эмоций
     await save_memory(uid, "user", msg.text)
     await update_emotion(uid, msg.text)
     
-    # Behavior analysis
     behavior = await behavior_analyze(uid, msg.text)
     if behavior:
         await msg.answer(behavior)
-        # Не возвращаем, чтобы дать возможность ответить и ИИ
     
-    # Получение настроения для промпта
     mood = await get_mood(uid)
-    
-    # AI response
     answer = await ask_ai(uid, text_for_ai, profile=profile, mood=mood, habits=habits)
     
-    # Fallback, если AI не ответил
     if not answer or answer.strip() in ["", "❌ AI ошибка"]:
         fallbacks = [
             "Я здесь. Расскажи, что на душе?",
@@ -595,22 +532,30 @@ async def chat(msg: Message, state: FSMContext):
 # === 🚀 MAIN ENTRYPOINT ===
 # =========================================================
 async def main():
+    # Обработка сигналов остановки от Railway
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+    
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop_event.set)
+    
     await init_db()
-    await acquire_lock()
-    if IS_MAIN:
-        scheduler.start()
-        logging.info("🚀 Scheduler started")
-        scheduler.add_job(retention, "interval", hours=12)
-        scheduler.add_job(habit_check, "interval", hours=6)
-        scheduler.add_job(morning_ping, "cron", hour=9)
-        scheduler.add_job(inactivity_check, "interval", hours=1)
-        asyncio.create_task(keep_lock_alive())
-        await bot.delete_webhook(drop_pending_updates=True)
-        await dp.start_polling(bot)
-    else:
-        logging.info("⏳ Secondary instance — waiting...")
-        while True:
-            await asyncio.sleep(3600)
+    logging.info("✅ Running as MAIN instance (single-deploy mode)")
+    
+    scheduler.start()
+    logging.info("🚀 Scheduler started")
+    scheduler.add_job(retention, "interval", hours=12)
+    scheduler.add_job(habit_check, "interval", hours=6)
+    scheduler.add_job(morning_ping, "cron", hour=9)
+    scheduler.add_job(inactivity_check, "interval", hours=1)
+    
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    polling_task = asyncio.create_task(dp.start_polling(bot))
+    
+    # Ждём либо остановки polling, либо сигнала от Railway
+    await asyncio.wait([polling_task, asyncio.create_task(stop_event.wait())], return_when=asyncio.FIRST_COMPLETED)
+    logging.info("👋 Bot stopped gracefully")
 
 if __name__ == "__main__":
     try:
