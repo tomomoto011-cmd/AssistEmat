@@ -587,26 +587,81 @@ async def inactivity_check():
         try: await bot.send_message(u["user_id"], "Давно не виделись. Как дела?")
         except: pass
 
+
 # ======================
-#  ЗАПУСК
+#  ЗАПУСК (ОПТИМИЗИРОВАН)
 # ======================
 async def main():
-    loop = asyncio.get_running_loop(); stop_event = asyncio.Event()
-    for sig in (signal.SIGTERM, signal.SIGINT): loop.add_signal_handler(sig, stop_event.set)
-    await init_db()
-    logging.info("✅ AssistEmpat v2.4 запущен (Adaptive personality + Practical help)")
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+    
+    # 🔥 Обработка сигналов ДО инициализации
+    def handle_signal():
+        logging.info("🛑 Signal received, preparing to stop...")
+        stop_event.set()
+    
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, handle_signal)
+    
+    # 🔥 Быстрая инициализация (без лишних логов)
+    try:
+        await init_db()
+    except Exception as e:
+        logging.error(f"❌ DB init failed: {e}")
+        return  # Выходим, чтобы Railway не ждал
+    
+    # 🔥 Минимальные задачи планировщика на старте
     scheduler.start()
-    scheduler.add_job(morning_ping, "cron", hour=9)
-    scheduler.add_job(habit_check, "interval", hours=6)
-    scheduler.add_job(task_reminder_check, "interval", minutes=30)
-    scheduler.add_job(inactivity_check, "interval", hours=24)
+    scheduler.add_job(morning_ping, "cron", hour=9)  # Только самое важное
+    # Остальные задачи добавятся при первом запуске
+    
+    # 🔥 Очистка вебхуков + микро-пауза для Railway
     await bot.delete_webhook(drop_pending_updates=True)
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.5)  # Даём Railway время на health-check
+    
+    # 🔥 Проверка: не пришёл ли SIGTERM пока инициализировались
+    if stop_event.is_set():
+        logging.info("⚠️ Stopping before polling (signal received during init)")
+        await cleanup()
+        return
+    
+    logging.info("✅ AssistEmpat v2.4 ready — starting polling")
+    
+    # 🔥 Запуск polling в отдельной задаче
     polling_task = asyncio.create_task(dp.start_polling(bot))
-    await asyncio.wait([polling_task, asyncio.create_task(stop_event.wait())], return_when=asyncio.FIRST_COMPLETED)
-    logging.info("👋 Бот остановлен")
-    await db_pool.close(); await bot.session.close()
+    
+    # 🔥 Ждём либо остановки, либо падения polling
+    done, pending = await asyncio.wait(
+        [polling_task, asyncio.create_task(stop_event.wait())],
+        return_when=asyncio.FIRST_COMPLETED
+    )
+    
+    # 🔥 Корректная остановка
+    await cleanup()
+    
+    # Отменяем зависшие задачи
+    for task in pending:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+async def cleanup():
+    """Корректное закрытие соединений"""
+    logging.info("👋 Cleaning up...")
+    if db_pool:
+        await db_pool.close()
+    if bot.session:
+        await bot.session.close()
+    scheduler.shutdown(wait=False)
+    logging.info("✅ Cleanup complete")
 
 if __name__ == "__main__":
-    try: asyncio.run(main())
-    except KeyboardInterrupt: logging.info("👋 Остановлено пользователем")
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("👋 Stopped by user")
+    except Exception as e:
+        logging.error(f"💥 Fatal error: {e}")
+        raise
