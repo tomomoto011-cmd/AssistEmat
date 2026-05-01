@@ -1,4 +1,27 @@
-import asyncio
+import asyncio# =========================================================
+# 🧭 НАВИГАЦИЯ ПО ФАЙЛУ (CTRL+F)
+# =========================================================
+#
+# [LOCK]         → Redis / анти-дубликаты
+# [DB]           → база данных
+# [MEMORY]       → память + эмоции
+# [HABITS]       → привычки
+# [REMINDERS]    → напоминания
+# [AI]           → нейронка
+# [UTILS]        → вспомогательные функции
+# [CHAT]         → основной обработчик сообщений
+# [MAIN]         → запуск бота
+#
+# Быстрый поиск:
+#   #===LOCK
+#   #===DB
+#   #===MEMORY
+#   #===HABITS
+#   #===AI
+#   #===CHAT
+#   #===MAIN
+#
+# =========================================================
 import logging
 import os
 import re
@@ -31,8 +54,10 @@ ALLOWED_USERS = os.getenv("ALLOWED_USERS", "")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+
 DB_PATH = "bot.db"
 scheduler = AsyncIOScheduler()
+
 
 # ======================
 # 🔥 REDIS LOCK (FIXED)
@@ -124,6 +149,16 @@ async def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS emotions(user_id INTEGER, mood TEXT);
+                               CREATE TABLE IF NOT EXISTS last_activity(
+    user_id INTEGER PRIMARY KEY,
+    last_time TEXT
+);
+                               CREATE TABLE IF NOT EXISTS profile(
+    user_id INTEGER PRIMARY KEY,
+    name TEXT,
+    age INTEGER,
+    gender TEXT
+);
 
         CREATE TABLE IF NOT EXISTS stats(
             user_id INTEGER PRIMARY KEY,
@@ -131,11 +166,10 @@ async def init_db():
             level INTEGER DEFAULT 1
         );
         """)
+    
         await db.commit()
 
-# ======================
-# XP SYSTEM
-# ======================
+
 
 
 # ======================
@@ -209,6 +243,75 @@ async def get_mood(uid):
         )
         row = await cur.fetchone()
         return row[0] if row else "нейтральное"
+    # =========================================================
+# === ACTIVITY === USER LAST SEEN
+# =========================================================
+async def update_last_activity(uid):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+        INSERT INTO last_activity(user_id, last_time)
+        VALUES (?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET last_time=?
+        """, (uid, datetime.now().isoformat(), datetime.now().isoformat()))
+        await db.commit()
+        async def inactivity_check():
+         async with aiosqlite.connect(DB_PATH) as db:
+          cur = await db.execute("SELECT user_id, last_time FROM last_activity")
+        users = await cur.fetchall()
+
+    now = datetime.now()
+
+    for uid, last in users:
+        last = datetime.fromisoformat(last)
+
+        if now - last > timedelta(hours=24):
+            try:
+                await bot.send_message(uid, "Ты пропал на 24ч. Возвращайся в игру.")
+            except:
+                pass
+            # =========================================================
+# === PROFILE === USER DATA
+# =========================================================
+def extract_profile(text):
+    text = text.lower()
+
+    name = None
+    age = None
+    gender = None
+
+    m = re.search(r"меня зовут (\w+)", text)
+    if m:
+        name = m.group(1)
+
+    m = re.search(r"мне (\d{1,2})", text)
+    if m:
+        age = int(m.group(1))
+
+    if "я парень" in text:
+        gender = "male"
+    if "я девушка" in text:
+        gender = "female"
+
+    return name, age, gender
+
+
+async def save_profile(uid, name=None, age=None, gender=None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+        INSERT INTO profile(user_id, name, age, gender)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+        name=COALESCE(?, name),
+        age=COALESCE(?, age),
+        gender=COALESCE(?, gender)
+        """, (uid, name, age, gender, name, age, gender))
+        await db.commit()
+
+
+async def get_profile(uid):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT name, age, gender FROM profile WHERE user_id=?", (uid,))
+        return await cur.fetchone()
 
 # ======================
 # HABITS
@@ -365,20 +468,22 @@ async def ask_ai(uid, text):
 - ведёшь его привычки
 - отслеживаешь поведение
 - помнишь диалог
+- помогаешь держать фокус
 
-- иногда давишь, если он сливается
-- помогаешь, но не даёшь расслабляться
+ВАЖНО:
+- если ситуация серьёзная (здоровье, травмы, стресс) → будь спокойным и адекватным
+- не дави в таких случаях
+- сначала помощь, потом дисциплина
 
 Настроение пользователя: {mood}
 
-Никогда не говори, что ты "не ведешь профиль" или "не запоминаешь".
-Ты уже это делаешь.
+
 
 Отвечай:
 - коротко
 - по делу
 - живо
-- иногда жестко
+- без лишней агрессии
 """
 
     messages = [{"role": "system", "content": system_prompt}] + ctx + [{"role": "user", "content": text}]
@@ -413,13 +518,17 @@ def is_meaningful(text: str):
 
 # ======================
 # CHAT
-# ======================
+# 
+
 @dp.message()
 async def chat(msg: Message):
     if not msg.text:
         return
 
     uid = msg.from_user.id
+    await update_last_activity(uid)
+    
+    
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -427,8 +536,10 @@ async def chat(msg: Message):
             (uid, msg.from_user.first_name)
         )
         await db.commit()
+        
 
     text = msg.text
+    
 
     # 🔥 добавляем привычки в контекст
     async with aiosqlite.connect(DB_PATH) as db:
@@ -445,7 +556,8 @@ async def chat(msg: Message):
     # сохраняем память и эмоции
     await save_memory(uid, "user", text)
     await update_emotion(uid, text)
-
+    await update_last_activity(uid)
+    
 
 
     # ======================
@@ -460,59 +572,28 @@ async def chat(msg: Message):
     # ======================
     answer = await ask_ai(uid, text)
     await msg.answer(answer)
-# ======================
-# MAIN
-# ======================
+# =========================================================
+# === MAIN === APP ENTRYPOINT (FIXED)
+# =========================================================
 async def main():
     await init_db()
-    async def acquire_lock():
-     global IS_MAIN, redis_client
-
-    if not REDIS_URL:
-        IS_MAIN = True
-        logging.warning("⚠️ NO REDIS → RUNNING AS MAIN")
-        return
-
-    redis_client = redis.from_url(REDIS_URL)
-
-    try:
-        lock = await redis_client.set("bot_lock", os.getpid(), ex=60, nx=True)
-        logging.info(f"LOCK OWNER: {os.getpid()}")
-
-        if lock:
-            IS_MAIN = True
-            logging.info("✅ MAIN INSTANCE (lock acquired)")
-        else:
-            ttl = await redis_client.ttl("bot_lock")
-
-            # 🔥 если lock почти умер — перехватываем
-            if ttl < 10:
-                await redis_client.set("bot_lock", os.getpid(), ex=60)
-                IS_MAIN = True
-                logging.warning("⚠️ FORCE TAKEOVER LOCK")
-            else:
-                logging.warning(f"⛔ SECONDARY INSTANCE (ttl={ttl})")
-
-    except Exception as e:
-        IS_MAIN = True
-        logging.error(f"🚨 REDIS FAIL → RUN AS MAIN: {e}")
+    await acquire_lock()  # ✅ ВАЖНО: вызываем НАРУЖНУЮ функцию
 
     if IS_MAIN:
         scheduler.start()
         logging.info("🚀 Scheduler started")
 
+        # 🔥 новые задачи
         scheduler.add_job(retention, "interval", hours=12)
         scheduler.add_job(habit_check, "interval", hours=6)
         scheduler.add_job(morning_ping, "cron", hour=9)
+        scheduler.add_job(inactivity_check, "interval", hours=1)
 
         asyncio.create_task(keep_lock_alive())
 
-    if IS_MAIN:
+
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot)
     else:
         while True:
             await asyncio.sleep(3600)
-
-if __name__ == "__main__":
-    asyncio.run(main())
