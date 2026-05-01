@@ -136,25 +136,7 @@ async def init_db():
 # ======================
 # XP SYSTEM
 # ======================
-async def add_xp(uid, amount=5):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT xp, level FROM stats WHERE user_id=?", (uid,))
-        row = await cur.fetchone()
 
-        if not row:
-            await db.execute("INSERT INTO stats(user_id,xp,level) VALUES (?,?,?)", (uid, amount, 1))
-            await db.commit()
-            return
-
-        xp, level = row
-        xp += amount
-
-        if xp >= level * 50:
-            level += 1
-            await bot.send_message(uid, f"🔥 LEVEL UP → {level}")
-
-        await db.execute("UPDATE stats SET xp=?, level=? WHERE user_id=?", (xp, level, uid))
-        await db.commit()
 
 # ======================
 # FSM
@@ -383,7 +365,7 @@ async def ask_ai(uid, text):
 - ведёшь его привычки
 - отслеживаешь поведение
 - помнишь диалог
-- начисляешь XP и уровень
+
 - иногда давишь, если он сливается
 - помогаешь, но не даёшь расслабляться
 
@@ -464,12 +446,7 @@ async def chat(msg: Message):
     await save_memory(uid, "user", text)
     await update_emotion(uid, text)
 
-    # ======================
-    # XP (ТОЛЬКО ЗА ОСМЫСЛЕННОЕ)
-    # ======================
-    if is_meaningful(text):
-        await add_xp(uid, 3)
-        await msg.answer("+3 XP")
+
 
     # ======================
     # BEHAVIOR
