@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import CommandStart
+from aiogram.filters import Command, CommandStart
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -62,17 +62,14 @@ redis_client = None
 
 async def acquire_lock():
     global IS_MAIN, redis_client
-
     if not REDIS_URL or not REDIS_AVAILABLE:
         IS_MAIN = True
         logging.warning("⚠️ NO REDIS → RUNNING AS MAIN")
         return
-
     try:
         redis_client = redis.from_url(REDIS_URL)
         lock = await redis_client.set("bot_lock", os.getpid(), ex=60, nx=True)
         logging.info(f"LOCK OWNER: {os.getpid()}")
-
         if lock:
             IS_MAIN = True
             logging.info("✅ MAIN INSTANCE (lock acquired)")
@@ -99,7 +96,6 @@ async def keep_lock_alive():
 # ======================
 # 🛑 АНТИ-ДУБЛЬ
 # ======================
-# ⚠️ Внимание: глобальный счётчик — подходит для одного инстанса
 LAST_UPDATE_ID = 0
 
 @dp.update.outer_middleware()
@@ -152,6 +148,12 @@ async def init_db():
             xp INTEGER DEFAULT 0,
             level INTEGER DEFAULT 1
         );
+        CREATE TABLE IF NOT EXISTS notes(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            content TEXT,
+            created_at TEXT
+        );
         """)
         await db.commit()
 
@@ -163,31 +165,25 @@ class ReminderFSM(StatesGroup):
     time = State()
 
 # ======================
-# ⏰ TIME PARSER (FIXED)
+# ⏰ TIME PARSER
 # ======================
 def parse_time(text):
     text = text.lower()
     now = datetime.now()
-
     if "вечером" in text:
         dt = now.replace(hour=19, minute=0, second=0, microsecond=0)
         return dt if dt > now else dt + timedelta(days=1)
-
     if "после работы" in text:
         dt = now.replace(hour=18, minute=30, second=0, microsecond=0)
         return dt if dt > now else dt + timedelta(days=1)
-
     if "завтра" in text:
         return (now + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
-
     m = re.search(r'через (\d+)\s*минут?', text)
     h = re.search(r'через (\d+)\s*час', text)
-
     if m:
         return now + timedelta(minutes=int(m.group(1)))
     if h:
         return now + timedelta(hours=int(h.group(1)))
-
     return None
 
 # ======================
@@ -209,12 +205,14 @@ async def get_memory(uid):
 
 async def update_emotion(uid, text):
     mood = "нейтральное"
-    if "груст" in text:
+    if "груст" in text or "печаль" in text or "тоск" in text:
         mood = "грусть"
-    elif "рад" in text:
+    elif "рад" in text or "счастлив" in text or "круто" in text:
         mood = "радость"
-    elif "устал" in text:
+    elif "устал" in text or "выгор" in text or "нет сил" in text:
         mood = "усталость"
+    elif "тревож" in text or "беспоко" in text or "нерв" in text:
+        mood = "тревога"
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT INTO emotions VALUES (?, ?)", (uid, mood))
         await db.commit()
@@ -241,7 +239,6 @@ async def update_last_activity(uid):
         await db.commit()
 
 async def inactivity_check():
-    """Проверяет пользователей, не активных 24+ часа"""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT user_id, last_time FROM last_activity")
         users = await cur.fetchall()
@@ -250,7 +247,7 @@ async def inactivity_check():
         try:
             last_dt = datetime.fromisoformat(last)
             if now - last_dt > timedelta(hours=24):
-                await bot.send_message(uid, "Ты пропал на 24ч. Возвращайся.")
+                await bot.send_message(uid, "Ты пропал на 24ч. Возвращайся, я здесь 🤍")
         except Exception as e:
             logging.warning(f"Не удалось отправить напоминание пользователю {uid}: {e}")
 
@@ -262,13 +259,13 @@ def extract_profile(text):
     name = age = gender = None
     m = re.search(r"меня зовут (\w+)", text)
     if m:
-        name = m.group(1)
+        name = m.group(1).capitalize()
     m = re.search(r"мне (\d{1,2})", text)
     if m:
         age = int(m.group(1))
-    if "я парень" in text:
+    if "я парень" in text or "я мужчина" in text:
         gender = "male"
-    if "я девушка" in text:
+    if "я девушка" in text or "я женщина" in text:
         gender = "female"
     return name, age, gender
 
@@ -296,7 +293,7 @@ async def create_habit(uid, name):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT id FROM habits WHERE user_id=? AND name=?", (uid, name))
         if await cur.fetchone():
-            return  # Уже есть
+            return
         await db.execute("INSERT INTO habits(user_id,name) VALUES (?,?)", (uid, name))
         await db.commit()
 
@@ -334,19 +331,19 @@ async def behavior_analyze(uid, text):
     mood = await get_mood(uid)
     if "устал" in text:
         await create_habit(uid, "Сон до 23:00")
-        return "Ты часто устаёшь. Добавил привычку: сон до 23:00"
+        return "Ты часто устаёшь. Добавил привычку: сон до 23:00 💤"
     if "потом" in text:
-        return "Вот это 'потом' тебя и убивает."
+        return "Вот это 'потом' тебя и убивает. Давай сделаем маленький шаг сейчас?"
     if "не хочу" in text:
-        return "Хочешь или нет — не важно. Важно сделаешь или нет."
+        return "Хочешь или нет — не важно. Важно сделаешь или нет. Я верю в тебя."
     if "завтра" in text:
-        return "Ты опять перекладываешь. Сделай сегодня."
+        return "Ты опять перекладываешь. Сделай сегодня — завтра скажешь спасибо."
     if mood == "грусть":
-        return "Сегодня без давления. Но не пропадай."
+        return "Сегодня без давления. Но не пропадай, я рядом 🤍"
     return None
 
 # ======================
-# 🔍 HABIT CHECK (ежедневный)
+# 🔍 HABIT CHECK
 # ======================
 async def habit_check():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -359,7 +356,7 @@ async def habit_check():
             last_date = datetime.fromisoformat(last).date()
             now = datetime.now().date()
             if last_date < now - timedelta(days=1):
-                await bot.send_message(uid, f"{name}\nТы пропустил. Это откат.")
+                await bot.send_message(uid, f"{name}\nТы пропустил. Это откат, но всё поправимо 💪")
         except Exception as e:
             logging.warning(f"Ошибка в habit_check для {uid}: {e}")
 
@@ -398,7 +395,7 @@ async def retention():
         users = await cur.fetchall()
     for u in users:
         try:
-            await bot.send_message(u[0], "Ты пропал. Возвращайся.")
+            await bot.send_message(u[0], "Ты пропал. Возвращайся, я здесь 🤍")
         except:
             pass
 
@@ -408,33 +405,35 @@ async def morning_ping():
         users = await cur.fetchall()
     for u in users:
         try:
-            await bot.send_message(u[0], "☀️ Доброе утро. План дня?")
+            await bot.send_message(u[0], "☀️ Доброе утро. Как план на день?")
         except:
             pass
 
 # ======================
 # 🤖 AI (OpenRouter)
 # ======================
-async def ask_ai(uid, text):
+async def ask_ai(uid, text, profile=None, mood=None, habits=None):
     ctx = await get_memory(uid)
-    mood = await get_mood(uid)
+    habit_list = ", ".join([h[0] for h in habits]) if habits else "пока не заданы"
+    user_name = profile[0] if profile and profile[0] else "друг"
+    
     system_prompt = f"""
-Ты — персональный ассистент и система контроля пользователя.
-Ты:
-- ведёшь его привычки
-- отслеживаешь поведение
-- помнишь диалог
-- помогаешь держать фокус
-ВАЖНО:
-- если ситуация серьёзная (здоровье, травмы, стресс) → будь спокойным и адекватным
-- не дави в таких случаях
-- сначала помощь, потом дисциплина
-Настроение пользователя: {mood}
-Отвечай:
-- коротко
-- по делу
-- живо
-- без лишней агрессии
+Ты — личный помощник и друг пользователя {user_name}.
+Твоя роль: поддерживать, слушать, мягко направлять, помогать с задачами.
+
+Контекст:
+- Настроение пользователя: {mood}
+- Его привычки: {habit_list}
+
+Правила:
+1. Отвечай тепло, но без излишней эмоциональности — как надёжный друг
+2. Если пользователь грустит или тревожится — сначала поддержка, потом мягкие советы
+3. Если спрашивает о функциях — кратко перечисли и предложи помочь с конкретной
+4. Избегай шаблонных фраз. Лучше: "Расскажи, что на душе?" чем "Чем могу помочь?"
+5. Коротко, по делу, с заботой
+6. Не давай медицинских диагнозов. При острых симптомах — мягко направляй к специалисту
+
+Если пользователь спрашивает "кто я" или "знаешь ли ты меня" — ответь по факту, опираясь на память.
 """
     messages = [{"role": "system", "content": system_prompt}] + ctx + [{"role": "user", "content": text}]
     try:
@@ -442,56 +441,154 @@ async def ask_ai(uid, text):
             r = await client.post(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-                json={"model": "openai/gpt-4o-mini", "messages": messages},
-                timeout=15
+                json={"model": "openai/gpt-4o-mini", "messages": messages, "temperature": 0.7},
+                timeout=20
             )
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
     except Exception as e:
         logging.error(f"AI request failed: {e}")
-        return "❌ AI ошибка. Попробуй позже."
+        return None
 
 # ======================
 # 🔍 UTILS
 # ======================
 def is_meaningful(text: str):
     text = text.lower().strip()
-    if len(text) < 5:
+    if len(text) < 3:
         return False
-    garbage = ["ыва", "asdf", "123", "qwe"]
+    garbage = ["ыва", "asdf", "123", "qwe", "!!!", "???"]
     if any(g in text for g in garbage):
         return False
     return True
 
 # ======================
+# 💬 COMMANDS
+# ======================
+@dp.message(Command("start"))
+async def cmd_start(msg: Message, state: FSMContext):
+    await state.clear()
+    profile = await get_profile(msg.from_user.id)
+    name = profile[0] if profile and profile[0] else ""
+    greeting = f"Привет, {name}! Рад тебя видеть 🤍" if name else "Привет! Я твой помощник. Как тебя зовут?"
+    await msg.answer(greeting)
+
+@dp.message(Command("help"))
+async def cmd_help(msg: Message):
+    help_text = """
+🤍 **AssistEmpat — твой личный помощник**
+
+📋 **Что я умею:**
+• 🗣 Слушаю и поддерживаю в трудную минуту
+• 📝 Создаю заметки и напоминания
+• 🔁 Помогаю формировать привычки
+• 📊 Отслеживаю настроение и прогресс
+• 🧠 Помню наши разговоры
+
+⚡ **Как пользоваться:**
+• Просто пиши как другу — я пойму
+• "напомни выпить воды через 2 часа" ⏰
+• "я устал, не могу уснуть" — помогу разобраться
+• "добавь привычку: зарядка по утрам" 🔁
+
+🔧 **Команды:**
+• `/start` — начать заново
+• `/help` — эта справка
+• `/profile` — посмотреть данные о себе
+
+💬 Я здесь, чтобы помочь. Пиши 💙
+"""
+    await msg.answer(help_text, parse_mode="Markdown")
+
+@dp.message(Command("profile"))
+async def cmd_profile(msg: Message):
+    profile = await get_profile(msg.from_user.id)
+    if profile and profile[0]:
+        name, age, gender = profile
+        info = f"👤 **Твой профиль**\n"
+        info += f"Имя: {name}\n"
+        info += f"Возраст: {age}\n" if age else ""
+        info += f"Пол: {'мужской' if gender == 'male' else 'женский'}\n" if gender else ""
+        await msg.answer(info, parse_mode="Markdown")
+    else:
+        await msg.answer("Пока нет данных. Напиши о себе: 'меня зовут...', 'мне 25 лет', 'я парень/девушка'")
+
+# ======================
 # 💬 CHAT HANDLER
 # ======================
 @dp.message()
-async def chat(msg: Message):
+async def chat(msg: Message, state: FSMContext):
     if not msg.text:
         return
     uid = msg.from_user.id
     await update_last_activity(uid)
+    
+    # Регистрация пользователя в БД
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT OR IGNORE INTO users VALUES (?, ?)", (uid, msg.from_user.first_name))
         await db.commit()
-    text = msg.text
-    # Добавляем привычки в контекст
+    
+    text = msg.text.lower().strip()
+    
+    # 🔥 Распознавание профиля при первом контакте
+    profile = await get_profile(uid)
+    if not profile or not profile[0]:
+        name, age, gender = extract_profile(msg.text)
+        if name or age or gender:
+            await save_profile(uid, name, age, gender)
+            greeting = f"Приятно познакомиться, {name}! Я запомнил 🤍" if name else "Привет! Я запомнил тебя."
+            await msg.answer(greeting)
+            return
+    
+    # 🔥 Обработка запросов про заметки
+    if "замет" in text or "запиш" in text or "сохрани" in text:
+        if "напомн" not in text:  # чтобы не конфликтовало с напоминаниями
+            await msg.answer("Запишу 📝 Что сохранить?")
+            # Можно добавить сохранение в таблицу notes
+            return
+    
+    # 🔥 Обработка запросов про напоминания
+    if "напомн" in text and "когда" not in text and "через" not in text and "в " not in text:
+        await msg.answer("О чём напомнить и когда? Например:\n• 'напомни выпить воды через 2 часа' 💧\n• 'напомни позвонить завтра в 18:00' 📞")
+        return
+    
+    # Загрузка привычек для контекста
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT name FROM habits WHERE user_id=?", (uid,))
         habits = await cur.fetchall()
+    
     if habits:
         habit_list = ", ".join([h[0] for h in habits])
-        text += f"\n(его привычки: {habit_list})"
-    # Сохраняем память и эмоции
-    await save_memory(uid, "user", text)
-    await update_emotion(uid, text)
+        text_for_ai = msg.text + f"\n(его привычки: {habit_list})"
+    else:
+        text_for_ai = msg.text
+    
+    # Сохранение памяти и эмоций
+    await save_memory(uid, "user", msg.text)
+    await update_emotion(uid, msg.text)
+    
     # Behavior analysis
-    behavior = await behavior_analyze(uid, text)
+    behavior = await behavior_analyze(uid, msg.text)
     if behavior:
         await msg.answer(behavior)
+        # Не возвращаем, чтобы дать возможность ответить и ИИ
+    
+    # Получение настроения для промпта
+    mood = await get_mood(uid)
+    
     # AI response
-    answer = await ask_ai(uid, text)
+    answer = await ask_ai(uid, text_for_ai, profile=profile, mood=mood, habits=habits)
+    
+    # Fallback, если AI не ответил
+    if not answer or answer.strip() in ["", "❌ AI ошибка"]:
+        fallbacks = [
+            "Я здесь. Расскажи, что на душе?",
+            "Слышу тебя. Хочешь выговориться?",
+            "Я рядом. Что происходит?",
+            "Продолжай, я слушаю 🤍"
+        ]
+        answer = random.choice(fallbacks)
+    
     await msg.answer(answer)
 
 # =========================================================
