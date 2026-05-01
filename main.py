@@ -10,7 +10,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import CommandStart
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.memory import MemoryStorage  # 🔥 ФИКС FSM
+from aiogram.fsm.storage.memory import MemoryStorage
 
 import aiosqlite
 import httpx
@@ -25,6 +25,8 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 REDIS_URL = os.getenv("REDIS_URL")
+
+ALLOWED_USERS = os.getenv("ALLOWED_USERS", "")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -79,6 +81,14 @@ async def anti_duplicate(handler, event, data):
     return await handler(event, data)
 
 # ======================
+# 🔐 AUTH
+# ======================
+def is_allowed(user_id: int):
+    if not ALLOWED_USERS:
+        return True
+    return str(user_id) in ALLOWED_USERS.split(",")
+
+# ======================
 # БАЗА
 # ======================
 async def init_db():
@@ -99,7 +109,36 @@ async def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS emotions(user_id INTEGER, mood TEXT);
+
+        CREATE TABLE IF NOT EXISTS stats(
+            user_id INTEGER PRIMARY KEY,
+            xp INTEGER DEFAULT 0,
+            level INTEGER DEFAULT 1
+        );
         """)
+        await db.commit()
+
+# ======================
+# XP SYSTEM
+# ======================
+async def add_xp(uid, amount=5):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT xp, level FROM stats WHERE user_id=?", (uid,))
+        row = await cur.fetchone()
+
+        if not row:
+            await db.execute("INSERT INTO stats(user_id,xp,level) VALUES (?,?,?)", (uid, amount, 1))
+            await db.commit()
+            return
+
+        xp, level = row
+        xp += amount
+
+        if xp >= level * 50:
+            level += 1
+            await bot.send_message(uid, f"🔥 LEVEL UP → {level}")
+
+        await db.execute("UPDATE stats SET xp=?, level=? WHERE user_id=?", (xp, level, uid))
         await db.commit()
 
 # ======================
@@ -122,9 +161,8 @@ def parse_time(text):
     if "после работы" in text:
         return now.replace(hour=18, minute=30)
 
-    if "на выходных" in text:
-        days = (5 - now.weekday()) % 7
-        return (now + timedelta(days=days)).replace(hour=12, minute=0)
+    if "завтра" in text:
+        return (now + timedelta(days=1)).replace(hour=9, minute=0)
 
     m = re.search(r'через (\d+) минут', text)
     h = re.search(r'через (\d+) час', text)
@@ -133,9 +171,6 @@ def parse_time(text):
         return now + timedelta(minutes=int(m.group(1)))
     if h:
         return now + timedelta(hours=int(h.group(1)))
-
-    if "завтра" in text:
-        return (now + timedelta(days=1)).replace(hour=9, minute=0)
 
     return None
 
@@ -179,72 +214,68 @@ async def get_mood(uid):
         return row[0] if row else "нейтральное"
 
 # ======================
-# 💪 ДАВЛЕНИЕ
+# HABITS
 # ======================
-def pressure_text(streak, missed=False):
-    if missed:
-        return "Ты вчера пропустил. Это откат. Делаешь сегодня или сливаешь?"
-    if streak >= 7:
-        return "Ты уже в системе. Не ломай её."
-    if streak >= 3:
-        return "Неплохо. Но расслабишься — откатишься."
-    return "Начал — доведи."
+async def create_habit(uid, name):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT id FROM habits WHERE user_id=? AND name=?", (uid, name))
+        if await cur.fetchone():
+            return
+        await db.execute("INSERT INTO habits(user_id,name) VALUES (?,?)", (uid, name))
+        await db.commit()
+
+def habit_keyboard(hid):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Сделал", callback_data=f"done_{hid}")]
+    ])
+
+@dp.callback_query(F.data.startswith("done_"))
+async def done(call: CallbackQuery):
+    hid = int(call.data.split("_")[1])
+    now = datetime.now().date()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT streak,last_done FROM habits WHERE id=?", (hid,))
+        row = await cur.fetchone()
+
+        if not row:
+            return
+
+        streak, last = row
+        last = datetime.fromisoformat(last).date() if last else None
+
+        if last == now:
+            await call.answer("Уже было")
+            return
+
+        streak = streak + 1 if last == now - timedelta(days=1) else 1
+
+        await db.execute(
+            "UPDATE habits SET streak=?, last_done=? WHERE id=?",
+            (streak, now.isoformat(), hid)
+        )
+        await db.commit()
+
+    await add_xp(call.from_user.id, 10)
+    await call.message.edit_text(f"🔥 Стрик: {streak}")
 
 # ======================
-# 🧠 ПОВЕДЕНКА + AI ХАБИТЫ
+# BEHAVIOR
 # ======================
 async def behavior_analyze(uid, text):
     mood = await get_mood(uid)
 
     if "устал" in text:
         await create_habit(uid, "Сон до 23:00")
-        return "Ты часто устаёшь. Добавил привычку: сон до 23:00"
+        return "Добавил привычку: сон до 23:00"
 
     if mood == "грусть":
-        return "Окей. Сегодня без давления. Но не пропадай."
+        return "Сегодня без давления. Но не пропадай."
 
     return None
 
-async def create_habit(uid, name):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "SELECT id FROM habits WHERE user_id=? AND name=?",
-            (uid, name)
-        )
-        if await cur.fetchone():
-            return
-
-        await db.execute(
-            "INSERT INTO habits(user_id, name) VALUES (?, ?)",
-            (uid, name)
-        )
-        await db.commit()
-
 # ======================
-# 🤖 AI
-# ======================
-async def ask_ai(uid, text):
-    ctx = await get_memory(uid)
-    mood = await get_mood(uid)
-
-    messages = [
-        {"role": "system", "content": f"Настроение: {mood}. Будь давящим и живым."}
-    ] + ctx + [{"role": "user", "content": text}]
-
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
-                json={"model": "openai/gpt-4o-mini", "messages": messages},
-                timeout=15
-            )
-            return r.json()["choices"][0]["message"]["content"]
-    except:
-        return "❌ AI ошибка"
-
-# ======================
-# 🔥 REAL HABIT ENGINE
+# HABIT CHECK
 # ======================
 async def habit_check():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -287,42 +318,8 @@ async def reminder_time(msg: Message, state: FSMContext):
     await state.clear()
 
 # ======================
-# HABITS BUTTON
+# RETENTION
 # ======================
-@dp.callback_query(F.data.startswith("done_"))
-async def done(call: CallbackQuery):
-    hid = int(call.data.split("_")[1])
-    now = datetime.now().date()
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT streak,last_done FROM habits WHERE id=?", (hid,))
-        row = await cur.fetchone()
-
-        streak, last = row
-        last = datetime.fromisoformat(last).date() if last else None
-
-        missed = last and last < now - timedelta(days=1)
-
-        if last == now:
-            await call.answer("Уже было")
-            return
-
-        streak = streak + 1 if last == now - timedelta(days=1) else 1
-
-        await db.execute(
-            "UPDATE habits SET streak=?, last_done=? WHERE id=?",
-            (streak, now.isoformat(), hid)
-        )
-        await db.commit()
-
-    await call.message.edit_text(pressure_text(streak, missed))
-
-# ======================
-# RETENTION++
-# ======================
-FACTS = ["Факт: мозг жрет 20% энергии", "Факт: привычки = система"]
-QUOTES = ["Дисциплина — выбор", "Делай или оправдывайся"]
-
 async def retention():
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT user_id FROM users")
@@ -331,10 +328,43 @@ async def retention():
     for u in users:
         try:
             await bot.send_message(u[0], "Ты пропал. Возвращайся.")
-            await bot.send_message(u[0], random.choice(FACTS))
-            await bot.send_message(u[0], random.choice(QUOTES))
         except:
             pass
+
+# ======================
+# MORNING
+# ======================
+async def morning_ping():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT user_id FROM users")
+        users = await cur.fetchall()
+
+    for u in users:
+        try:
+            await bot.send_message(u[0], "☀️ Доброе утро. План дня?")
+        except:
+            pass
+
+# ======================
+# AI
+# ======================
+async def ask_ai(uid, text):
+    ctx = await get_memory(uid)
+    mood = await get_mood(uid)
+
+    messages = [{"role": "system", "content": f"Настроение: {mood}. Будь живым."}] + ctx + [{"role": "user", "content": text}]
+
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}"},
+                json={"model": "openai/gpt-4o-mini", "messages": messages},
+                timeout=15
+            )
+            return r.json()["choices"][0]["message"]["content"]
+    except:
+        return "❌ AI ошибка"
 
 # ======================
 # CHAT
@@ -344,17 +374,27 @@ async def chat(msg: Message):
     if not msg.text:
         return
 
+    uid = msg.from_user.id
+
+    if not is_allowed(uid):
+        await msg.answer("⛔ Нет доступа")
+        return
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR IGNORE INTO users VALUES (?, ?)", (uid, msg.from_user.first_name))
+        await db.commit()
+
     text = msg.text
 
-    await save_memory(msg.from_user.id, "user", text)
-    await update_emotion(msg.from_user.id, text)
+    await save_memory(uid, "user", text)
+    await update_emotion(uid, text)
+    await add_xp(uid, 3)
 
-    behavior = await behavior_analyze(msg.from_user.id, text)
-    answer = await ask_ai(msg.from_user.id, text)
-
+    behavior = await behavior_analyze(uid, text)
     if behavior:
         await msg.answer(behavior)
 
+    answer = await ask_ai(uid, text)
     await msg.answer(answer)
 
 # ======================
@@ -362,13 +402,6 @@ async def chat(msg: Message):
 # ======================
 @dp.message(CommandStart())
 async def start(msg: Message):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT OR IGNORE INTO users VALUES (?, ?)",
-            (msg.from_user.id, msg.from_user.first_name)
-        )
-        await db.commit()
-
     await msg.answer("Привет 👋")
 
 # ======================
@@ -382,6 +415,7 @@ async def main():
         scheduler.start()
         scheduler.add_job(retention, "interval", hours=12)
         scheduler.add_job(habit_check, "interval", hours=6)
+        scheduler.add_job(morning_ping, "cron", hour=9)
         asyncio.create_task(keep_lock_alive())
 
     if IS_MAIN:
