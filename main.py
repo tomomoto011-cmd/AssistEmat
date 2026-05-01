@@ -1,7 +1,8 @@
 # =========================================================
-#  ASSISTEMPAT BOT v2.4-fix (Railway health-check + stable polling)
-#  Архитектура: Grok (анализ) + OpenAI (адаптивный ответ)
-#  Режимы: Здоровье (сухой) / Психология (эмпат) / Секретарь (позитив) / Болтовня (юмор)
+#  ASSISTEMPAT BOT v2.5 (Simple & Stable)
+#  Архитектура: Grok (анализ) + OpenAI (универсальный ответ)
+#  Убрано: авто-режимы (health/psychology/secretary)
+#  Оставлено: один универсальный промпт + детекция кризисов
 # =========================================================
 
 import asyncio
@@ -25,8 +26,6 @@ import asyncpg
 import httpx
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
-# 🔥 Health server imports
 from aiohttp import web
 
 load_dotenv()
@@ -42,8 +41,6 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
 CITY_DEFAULT = os.getenv("CITY_DEFAULT", "Москва")
 ALLOWED_USERS = os.getenv("ALLOWED_USERS", "")
-
-# 🔥 Порт для health-check (Railway compatibility)
 HEALTH_PORT = int(os.getenv("PORT", os.getenv("RAILWAY_PUBLIC_PORT", 8080)))
 
 bot = Bot(token=BOT_TOKEN)
@@ -52,25 +49,18 @@ scheduler = AsyncIOScheduler(timezone=timezone.utc)
 db_pool = None
 
 # ======================
-#  🔥 ДЕТЕКТОР РЕЖИМОВ И КРИЗИСОВ
+#  🔥 ДЕТЕКЦИЯ КРИЗИСОВ (оставляем!)
 # ======================
-HEALTH_KEYWORDS = ["бол", "слом", "перелом", "ушиб", "рана", "кров", "травм", "ожог", "температур", "давлен", "сердц", "голова", "живот", "тошн", "лекарств", "таблетк"]
-PSYCHO_KEYWORDS = ["отнош", "ссора", "конфликт", "не понимаю", "устал от", "депресс", "тревож", "стресс", "одиноч", "не могу найти", "почему он", "почему она", "как быть", "что делать"]
-SECRETARY_KEYWORDS = ["напомн", "задач", "список", "план", "встреч", "дел", "запиш", "сохрани", "привычк", "трекер", "статистик"]
-FRUSTRATION_KEYWORDS = ["скотина", "бесчувственный", "бездушный", "ты тупой", "ты не понимаешь", "опять", "достал", "хватит", "бесит", "раздража"]
-RESET_KEYWORDS = ["привет", "здравствуй", "отбой", "стоп", "новое", "другое", "меню", "пока", "до свидания"]
-
-def detect_mode(text: str) -> str:
-    text_lower = text.lower()
-    if any(kw in text_lower for kw in HEALTH_KEYWORDS): return "health"
-    if any(kw in text_lower for kw in PSYCHO_KEYWORDS): return "psychology"
-    if any(kw in text_lower for kw in SECRETARY_KEYWORDS): return "secretary"
-    return "chat"
+CRISIS_KEYWORDS = ["суицид", "умер", "не хочу жить", "убить себя", "паник", "не могу дышать", "сердце", "давление"]
+FRUSTRATION_KEYWORDS = ["скотина", "бесчувственный", "ты тупой", "опять", "достал", "хватит", "бесит"]
+RESET_KEYWORDS = ["привет", "здравствуй", "отбой", "стоп", "новое", "другое", "меню", "пока"]
 
 def is_crisis(text: str) -> tuple[bool, str]:
     text_lower = text.lower()
-    if any(w in text_lower for w in ["суицид", "умер", "не хочу жить", "убить себя"]): return True, "critical"
-    if any(w in text_lower for w in ["паник", "не могу дышать", "сердце", "давление"]): return True, "medical_emergency"
+    if any(w in text_lower for w in ["суицид", "умер", "не хочу жить", "убить себя"]):
+        return True, "critical"
+    if any(w in text_lower for w in ["паник", "не могу дышать", "сердце", "давление"]):
+        return True, "medical_emergency"
     return False, ""
 
 def should_reset_context(text: str) -> bool:
@@ -115,7 +105,6 @@ async def is_duplicate_response(uid: int, new_text: str) -> bool:
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT content_hash FROM response_log WHERE user_id=$1 ORDER BY created_at DESC LIMIT 3", uid)
         if new_hash in [r["content_hash"] for r in rows]:
-            logging.warning(f"🔄 Duplicate for user {uid}")
             return True
         await conn.execute("INSERT INTO response_log(user_id, content_hash) VALUES ($1, $2)", uid, new_hash)
         await conn.execute("DELETE FROM response_log WHERE user_id=$1 AND id NOT IN (SELECT id FROM response_log WHERE user_id=$1 ORDER BY created_at DESC LIMIT 20)", uid)
@@ -165,11 +154,11 @@ def external_link_keyboard(link: str, label: str = "Открыть"):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"🔗 {label}", url=link)]])
 
 # ======================
-#  GROK API
+#  GROK API (анализ + ссылки)
 # ======================
 async def call_grok_analysis(text: str, history: list = None, profile: dict = None) -> dict:
     if not GROK_API_KEY:
-        return {"topic":"general","tags":[],"intent":"chat","emotional_tone":"neutral","action_items":[],"priority":"medium","refined_prompt":text,"is_task_creation":False,"external_link_needed":None,"external_link":None,"mode":"chat"}
+        return {"topic":"general","tags":[],"intent":"chat","emotional_tone":"neutral","action_items":[],"priority":"medium","refined_prompt":text,"is_task_creation":False,"external_link_needed":None,"external_link":None}
     try:
         history_ctx = "\n".join([f"{m['role']}: {m['content']}" for m in (history or [])[-5:]])
         user_info = f"Имя:{profile.get('name')},Возраст:{profile.get('age')},Пол:{profile.get('gender')}" if profile else ""
@@ -177,7 +166,7 @@ async def call_grok_analysis(text: str, history: list = None, profile: dict = No
 Пользователь:{user_info}
 Сообщение:{text}
 История:{history_ctx}
-Формат:{{"topic":"работа|учеба|здоровье|отношения|эмоции|быт|задача|погода|кино|финансы|новости|кризис|другое","tags":[],"intent":"chat|question|task|request_help|create_task|request_external_link|crisis_support","emotional_tone":"neutral|positive|negative|stressed|tired|distressed|angry","action_items":[],"priority":"low|medium|high|critical","refined_prompt":"...","is_task_creation":true/false,"external_link_needed":null|"weather"|"currency"|"cinema"|"news"|"translate","external_link_params":{{"city":"..."}} или null,"mode":"health|psychology|secretary|chat"}}"""
+Формат:{{"topic":"работа|учеба|здоровье|отношения|эмоции|быт|задача|погода|кино|финансы|новости|кризис|другое","tags":[],"intent":"chat|question|task|request_help|create_task|request_external_link|crisis_support","emotional_tone":"neutral|positive|negative|stressed|tired|distressed|angry","action_items":[],"priority":"low|medium|high|critical","refined_prompt":"...","is_task_creation":true/false,"external_link_needed":null|"weather"|"currency"|"cinema"|"news"|"translate","external_link_params":{{"city":"..."}} или null}}"""
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post("https://api.x.ai/v1/chat/completions", headers={"Authorization":f"Bearer {GROK_API_KEY}","Content-Type":"application/json"}, json={"model":"grok-beta","messages":[{"role":"user","content":prompt}],"temperature":0.3})
             r.raise_for_status()
@@ -199,12 +188,12 @@ async def call_grok_analysis(text: str, history: list = None, profile: dict = No
             return data
     except Exception as e:
         logging.error(f"Grok error: {e}")
-        return {"topic":"general","tags":[],"intent":"chat","emotional_tone":"neutral","action_items":[],"priority":"medium","refined_prompt":text,"is_task_creation":False,"external_link_needed":None,"external_link":None,"mode":"chat"}
+        return {"topic":"general","tags":[],"intent":"chat","emotional_tone":"neutral","action_items":[],"priority":"medium","refined_prompt":text,"is_task_creation":False,"external_link_needed":None,"external_link":None}
 
 # ======================
-#  OPENAI (АДАПТИВНЫЙ)
+#  🔥 OPENAI (УНИВЕРСАЛЬНЫЙ ПРОМПТ)
 # ======================
-async def call_openai_primary(user_text, grok_analysis, profile, mood, habits, memory, tasks_count=0, mode="chat"):
+async def call_openai_primary(user_text, grok_analysis, profile, mood, habits, memory, tasks_count=0):
     if not OPENROUTER_API_KEY: return await call_qwen_fallback(user_text, grok_analysis, profile, mood, habits, memory, tasks_count)
     
     user_name = profile.get("name") if profile else ""
@@ -215,47 +204,29 @@ async def call_openai_primary(user_text, grok_analysis, profile, mood, habits, m
         label = grok_analysis.get("external_link_label", "Открыть")
         link_context = f"\n[Ссылка: {label} — {link}]"
     
-    if mode == "health":
-        mode_instruction = """
-🏥 РЕЖИМ: ЗДОРОВЬЕ
-- Сухой, конкретный, без "воды"
-- ДАЙ ПРАКТИЧЕСКИЕ СОВЕТЫ: "приложи холод на 15-20 минут", "не нагружай", "проверь на отёк"
-- Если серьёзно: "Срочно вызови скорую (103)"
-- Эмодзи: 🩹🤒💊 (максимум 1)
-"""
-    elif mode == "psychology":
-        mode_instruction = """
-🧠 РЕЖИМ: ПСИХОЛОГИЯ
-- Задавай уточняющие вопросы
-- Помоги найти решение
-- Не сюсюкай, но будь поддерживающим
-- Эмодзи: 🤍💙 (редко)
-"""
-    elif mode == "secretary":
-        mode_instruction = """
-💼 РЕЖИМ: СЕКРЕТАРЬ
-- Отвечай энергично: "Да, босс!", "Вас понял!", "Принято!"
-- Подтверждай действия кратко
-- Эмодзи: ✅📝
-"""
-    else:
-        mode_instruction = """
-💬 РЕЖИМ: БОЛТОВНЯ
-- Можешь немного подшутить (доброжелательно)
-- Зеркаль настроение
-- Эмодзи: по ситуации (максимум 1-2)
-"""
-    
+    # 🔥 ОДИН УНИВЕРСАЛЬНЫЙ ПРОМПТ (без режимов)
     system_prompt = f"""Ты — личный помощник {user_name if user_name else 'пользователя'}.
 Контекст: настроение={mood}, тема={grok_analysis.get('topic')}, привычки={habit_list}, задач={tasks_count}{link_context}
-{mode_instruction}
-🔥 ПРАВИЛА:
-1. НИКОГДА не повторяй ответ дважды подряд
-2. Если "привет"/"отбой"/"стоп" — СМЕНА ТЕМЫ, забудь старое
-3. Отвечай как живой человек — без "Привет! Чем могу помочь?"
-4. Коротко, по делу (2-4 предложения)
-Отвечай естественно."""
+
+ПРАВИЛА:
+1. **Практичность**: Давай конкретные советы, не "воду". Пример: "Приложи холод на 15-20 минут, не нагружай ногу"
+2. **Эмпатия**: Если человек в стрессе/грусти — сначала поддержка, потом советы
+3. **Краткость**: 2-4 предложения, по делу
+4. **Естественность**: Отвечай как друг, без "Привет! Чем могу помочь?", "Не стесняйся"
+5. **Без повторов**: Никогда не повторяй один ответ дважды
+6. **Смена темы**: Если видишь "привет"/"отбой"/"стоп" — забудь старое, отвечай на новое
+7. **Юмор**: Можно немного подшутить (доброжелательно), если уместно
+8. **Кризисы**: При серьёзных проблемах — мягко направляй к специалистам
+
+Примеры ХОРОШИХ ответов:
+- "Приложи холод на 15-20 минут через ткань. Не нагружай ногу. Если есть отёк — к врачу. 🩹"
+- "Понимаю, что тяжело. Расскажи, что именно произошло? Давай разберёмся."
+- "Да, босс! Записал: выпить воду через 2 часа. Напомню! ✅"
+- "Ха, ну ты даёшь! 😄 Ладно, местоимения заменяют существительные: я, ты, он..."
+
+Отвечай естественно, как в обычном чате."""
     
+    # Фильтруем память
     filtered_memory = []
     seen = set()
     for msg in reversed(memory[-12:]):
@@ -276,16 +247,16 @@ async def call_openai_primary(user_text, grok_analysis, profile, mood, habits, m
             r.raise_for_status()
             answer = r.json()["choices"][0]["message"]["content"].strip()
             if await is_duplicate_response(profile.get("user_id") if profile else 0, answer):
-                return get_fallback_response(user_text, mood, mode)
+                return get_fallback_response(user_text, mood)
             return answer
     except Exception as e:
         logging.error(f"OpenRouter error: {e}")
-        return get_fallback_response(user_text, mood, mode)
+        return get_fallback_response(user_text, mood)
 
-def get_fallback_response(user_text: str, mood: str, mode: str) -> str:
-    if mode == "health": return "Приложи холод на 15-20 минут. Не нагружай. Если не проходит — к врачу. 🩹"
-    if mode == "psychology": return "Понимаю, что непросто. Расскажи подробнее? Я слушаю. 🤍"
-    if mode == "secretary": return "Принято! Сделаю! ✅"
+def get_fallback_response(user_text: str, mood: str) -> str:
+    if mood == "грусть": return "Понимаю, что непросто. Расскажи подробнее? Я слушаю. 🤍"
+    if mood == "тревога": return "Всё будет хорошо. Что именно беспокоит? Давай разберёмся."
+    if mood == "усталость": return "Отдохни. Не перегружай себя. 🫂"
     return "Понял. Что ещё нужно?"
 
 async def call_qwen_fallback(user_text, grok_analysis, profile, mood, habits, memory, tasks_count=0):
@@ -320,7 +291,6 @@ async def update_emotion(uid, text):
     elif any(w in text for w in ["рад","счастлив","круто"]): mood = "радость"
     elif any(w in text for w in ["устал","выгор","нет сил"]): mood = "усталость"
     elif any(w in text for w in ["тревож","беспоко","нерв"]): mood = "тревога"
-    elif any(w in text for w in ["злюсь","бесит","раздраж"]): mood = "злость"
     async with db_pool.acquire() as conn: await conn.execute("INSERT INTO emotions(user_id,mood) VALUES ($1,$2)", uid, mood)
 async def get_mood(uid):
     async with db_pool.acquire() as conn:
@@ -462,7 +432,7 @@ def parse_ru_command(text:str) -> str|None:
     return None
 
 # ======================
-#  🔥 ОСНОВНОЙ ЧАТ
+#  🔥 ОСНОВНОЙ ЧАТ (УПРОЩЁННЫЙ)
 # ======================
 @dp.message()
 async def chat(msg:Message, state:FSMContext):
@@ -476,13 +446,16 @@ async def chat(msg:Message, state:FSMContext):
         if name or age or gender:
             await save_profile(uid,name,age,gender); profile = {"name":name,"age":age,"gender":gender}
             await msg.answer(f"Запомнил: {name}" if name else "Запомнил тебя"); return
-    mode = detect_mode(text)
-    crisis, crisis_type = is_crisis(text)
+    
+    # 🔥 Сброс контекста
     if should_reset_context(text) or any(kw in text.lower() for kw in FRUSTRATION_KEYWORDS):
         async with db_pool.acquire() as conn:
             await conn.execute("DELETE FROM memory WHERE user_id=$1 AND id IN (SELECT id FROM memory WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5)", uid)
+    
     memory = await get_memory(uid); mood = await get_mood(uid); habits = await get_habits(uid); tasks_count = (await get_task_stats(uid))["pending"] or 0
     await save_memory(uid,"user",text); await update_emotion(uid,text)
+    
+    # 🔥 Парсер команд
     cmd = parse_ru_command(text)
     if cmd:
         if cmd=="show_menu": await msg.answer("📋 Меню:", reply_markup=main_menu_keyboard()); return
@@ -495,14 +468,18 @@ async def chat(msg:Message, state:FSMContext):
         elif cmd=="ext_news": await cb_ext_news(msg); return
         elif cmd=="profile_show": await cmd_profile(msg); return
         elif cmd=="help_show": await cmd_help(msg); return
+    
     grok = await call_grok_analysis(text, memory, profile)
     if grok.get("external_link"):
         await msg.answer(f"{grok.get('external_link_label','Открыть')}:", reply_markup=external_link_keyboard(grok["external_link"], grok.get("external_link_label","Открыть"))); return
     if grok.get("is_task_creation") or any(w in text.lower() for w in ["задач","сделай","надо"]):
         await msg.answer("Создать задачу? Напиши /task или нажми кнопку 👇", reply_markup=main_menu_keyboard()); return
+    
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO message_tags(user_id,message_id,tags,topic) VALUES ($1,$2,$3,$4)", uid, msg.message_id, grok.get("tags",[]), grok.get("topic"))
-    answer = await call_openai_primary(text, grok, profile, mood, habits, memory, tasks_count, mode=mode)
+    
+    # 🔥 Универсальный ответ (без режимов)
+    answer = await call_openai_primary(text, grok, profile, mood, habits, memory, tasks_count)
     await msg.answer(answer)
 
 # ======================
@@ -533,101 +510,70 @@ async def inactivity_check():
         except: pass
 
 # ======================
-#  🔥 HEALTH CHECK (Railway-compatible)
+#  🔥 HEALTH CHECK
 # ======================
 async def health_handler(request):
-    """Мгновенный ответ для health-check"""
-    return web.json_response({"status":"ok","bot":"AssistEmpat v2.4-fix"}, headers={"Content-Type":"application/json"})
+    return web.json_response({"status":"ok","bot":"AssistEmpat v2.5"}, headers={"Content-Type":"application/json"})
 
 async def start_health_server():
-    """Запускает health-сервер на правильном порту"""
     app = web.Application()
     app.router.add_get('/health', health_handler)
-    app.router.add_get('/', health_handler)  # Также на корне для совместимости
+    app.router.add_get('/', health_handler)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', HEALTH_PORT)
     await site.start()
-    logging.info(f"🏥 Health server started on port {HEALTH_PORT} (env PORT={os.getenv('PORT')}, RAILWAY_PUBLIC_PORT={os.getenv('RAILWAY_PUBLIC_PORT')})")
+    logging.info(f"🏥 Health server on port {HEALTH_PORT}")
     return runner
 
 # ======================
-#  🔥 ЗАПУСК (стабильный для Railway)
+#  🔥 ЗАПУСК
 # ======================
 async def main():
-    logging.info(f"🚀 Starting AssistEmpat v2.4-fix (port={HEALTH_PORT})")
-    
+    logging.info(f"🚀 Starting AssistEmpat v2.5 (port={HEALTH_PORT})")
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
-    
     def handle_signal():
-        logging.info("🛑 SIGTERM/SIGINT received")
+        logging.info("🛑 Signal received")
         stop_event.set()
-    
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, handle_signal)
-    
-    # 1. Инициализация БД (быстро)
     try:
         await init_db()
         logging.info("✅ DB initialized")
     except Exception as e:
         logging.error(f"❌ DB init failed: {e}")
         return
-    
-    # 2. Запуск health-сервера ДО polling (чтобы Railway увидел)
     health_runner = None
     try:
         health_runner = await start_health_server()
-        # Микро-пауза, чтобы Railway успел "увидеть" сервер
         await asyncio.sleep(1.0)
         logging.info("✅ Health server ready")
     except Exception as e:
         logging.warning(f"⚠️ Health server failed: {e}")
-    
-    # 3. Проверка: не пришёл ли SIGTERM пока инициализировались
     if stop_event.is_set():
-        logging.info("⚠️ Stopping before polling (signal during init)")
         await cleanup(health_runner)
         return
-    
-    # 4. Планировщик
     scheduler.start()
     scheduler.add_job(morning_ping, "cron", hour=9)
     scheduler.add_job(habit_check, "interval", hours=6)
     scheduler.add_job(task_reminder_check, "interval", minutes=30)
     scheduler.add_job(inactivity_check, "interval", hours=24)
     logging.info("✅ Scheduler started")
-    
-    # 5. Очистка вебхуков
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    # 6. Ещё одна проверка перед стартом polling
     if stop_event.is_set():
         await cleanup(health_runner)
         return
-    
-    # 7. 🔥 ЗАПУСК POLLING
-    logging.info("✅ AssistEmpat v2.4-fix ready — STARTING POLLING")
+    logging.info("✅ AssistEmpat v2.5 ready — STARTING POLLING")
     polling_task = asyncio.create_task(dp.start_polling(bot))
-    
-    # 8. Ждём либо остановки, либо падения polling
-    done, pending = await asyncio.wait(
-        [polling_task, asyncio.create_task(stop_event.wait())],
-        return_when=asyncio.FIRST_COMPLETED
-    )
-    
-    # 9. Корректная остановка
+    done, pending = await asyncio.wait([polling_task, asyncio.create_task(stop_event.wait())], return_when=asyncio.FIRST_COMPLETED)
     await cleanup(health_runner)
-    
-    # 10. Отмена зависших задач
     for task in pending:
         task.cancel()
         try: await task
         except asyncio.CancelledError: pass
 
 async def cleanup(health_runner=None):
-    """Корректное закрытие всех соединений"""
     logging.info("👋 Cleaning up...")
     if db_pool:
         try: await db_pool.close()
