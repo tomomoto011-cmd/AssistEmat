@@ -246,6 +246,8 @@ async def get_mood(uid):
     # =========================================================
 # === ACTIVITY === USER LAST SEEN
 # =========================================================
+# === ACTIVITY ===
+
 async def update_last_activity(uid):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -254,10 +256,12 @@ async def update_last_activity(uid):
         ON CONFLICT(user_id) DO UPDATE SET last_time=?
         """, (uid, datetime.now().isoformat(), datetime.now().isoformat()))
         await db.commit()
-        async def inactivity_check():
-         async with aiosqlite.connect(DB_PATH) as db:
-          cur = await db.execute("SELECT user_id, last_time FROM last_activity")
-        users = await cur.fetchall()
+
+
+async def inactivity_check():
+    async with aiosqlite.connect(DB_PATH) as db:
+     cur = await db.execute("SELECT user_id, last_time FROM last_activity")
+    users = await cur.fetchall()
 
     now = datetime.now()
 
@@ -356,7 +360,7 @@ async def done(call: CallbackQuery):
         )
         await db.commit()
 
-    await add_xp(call.from_user.id, 10)
+   
     await call.message.edit_text(f"🔥 Стрик: {streak}")
 
 # ======================
@@ -556,7 +560,7 @@ async def chat(msg: Message):
     # сохраняем память и эмоции
     await save_memory(uid, "user", text)
     await update_emotion(uid, text)
-    await update_last_activity(uid)
+  
     
 
 
