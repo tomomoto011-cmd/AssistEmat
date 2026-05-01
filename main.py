@@ -1,8 +1,8 @@
 # =========================================================
-#  ASSISTEMPAT BOT v2.5 (Simple & Stable)
+#  ASSISTEMPAT BOT v2.6 (Simple + Layout Fix + Full Menu)
 #  Архитектура: Grok (анализ) + OpenAI (универсальный ответ)
-#  Убрано: авто-режимы (health/psychology/secretary)
-#  Оставлено: один универсальный промпт + детекция кризисов
+#  Убрано: авто-режимы
+#  Добавлено: авто-исправление раскладки клавиатуры
 # =========================================================
 
 import asyncio
@@ -49,7 +49,40 @@ scheduler = AsyncIOScheduler(timezone=timezone.utc)
 db_pool = None
 
 # ======================
-#  🔥 ДЕТЕКЦИЯ КРИЗИСОВ (оставляем!)
+#  🔥 АВТО-ИСПРАВЛЕНИЕ РАСКЛАДКИ (RU↔EN)
+# ======================
+LAYOUT_MAP = {
+    # EN→RU
+    'q': 'й', 'w': 'ц', 'e': 'у', 'r': 'к', 't': 'е', 'y': 'н', 'u': 'г', 'i': 'ш', 'o': 'щ', 'p': 'з', '[': 'х', ']': 'ъ',
+    'a': 'ф', 's': 'ы', 'd': 'в', 'f': 'а', 'g': 'п', 'h': 'р', 'j': 'о', 'k': 'л', 'l': 'д', ';': 'ж', "'": 'э',
+    'z': 'я', 'x': 'ч', 'c': 'с', 'v': 'м', 'b': 'и', 'n': 'т', 'm': 'ь', ',': 'б', '.': 'ю', '/': '.',
+    # RU→EN (обратный маппинг)
+    'й': 'q', 'ц': 'w', 'у': 'e', 'к': 'r', 'е': 't', 'н': 'y', 'г': 'u', 'ш': 'i', 'щ': 'o', 'з': 'p', 'х': '[', 'ъ': ']',
+    'ф': 'a', 'ы': 's', 'в': 'd', 'а': 'f', 'п': 'g', 'р': 'h', 'о': 'j', 'л': 'k', 'д': 'l', 'ж': ';', 'э': "'",
+    'я': 'z', 'ч': 'x', 'с': 'c', 'м': 'v', 'и': 'b', 'т': 'n', 'ь': 'm', 'б': ',', 'ю': '.', '.': '/'
+}
+
+def fix_layout(text: str) -> str:
+    """Пытается исправить раскладку, если текст выглядит как "ghbdtn" вместо "привет" """
+    if not text or len(text) < 3:
+        return text
+    
+    # Проверяем, похож ли текст на "неправильную" раскладку
+    ru_chars = sum(1 for c in text.lower() if c in 'абвгдеёжзийклмнопрстуфхцчшщъыьэюя')
+    en_chars = sum(1 for c in text.lower() if c in 'abcdefghijklmnopqrstuvwxyz')
+    
+    # Если больше русских букв в тексте на английской раскладке — конвертируем
+    if ru_chars > len(text) * 0.6 and en_chars < len(text) * 0.3:
+        return ''.join(LAYOUT_MAP.get(c.lower(), c) if c.isalpha() else c for c in text)
+    
+    # Если больше английских букв в тексте на русской раскладке — конвертируем обратно
+    if en_chars > len(text) * 0.6 and ru_chars < len(text) * 0.3:
+        return ''.join(LAYOUT_MAP.get(c.lower(), c) if c.isalpha() else c for c in text)
+    
+    return text
+
+# ======================
+#  🔥 ДЕТЕКЦИЯ КРИЗИСОВ
 # ======================
 CRISIS_KEYWORDS = ["суицид", "умер", "не хочу жить", "убить себя", "паник", "не могу дышать", "сердце", "давление"]
 FRUSTRATION_KEYWORDS = ["скотина", "бесчувственный", "ты тупой", "опять", "достал", "хватит", "бесит"]
@@ -104,8 +137,7 @@ async def is_duplicate_response(uid: int, new_text: str) -> bool:
     new_hash = hashlib.md5(new_text.strip().lower().encode()).hexdigest()
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT content_hash FROM response_log WHERE user_id=$1 ORDER BY created_at DESC LIMIT 3", uid)
-        if new_hash in [r["content_hash"] for r in rows]:
-            return True
+        if new_hash in [r["content_hash"] for r in rows]: return True
         await conn.execute("INSERT INTO response_log(user_id, content_hash) VALUES ($1, $2)", uid, new_hash)
         await conn.execute("DELETE FROM response_log WHERE user_id=$1 AND id NOT IN (SELECT id FROM response_log WHERE user_id=$1 ORDER BY created_at DESC LIMIT 20)", uid)
     return False
@@ -137,7 +169,7 @@ async def get_task_stats(uid):
         return await conn.fetchrow("SELECT COUNT(*) FILTER (WHERE status='pending') as pending, COUNT(*) FILTER (WHERE status='completed') as completed FROM tasks WHERE user_id=$1", uid)
 
 # ======================
-#  INLINE КЛАВИАТУРЫ
+#  INLINE КЛАВИАТУРЫ (ПОЛНОЕ МЕНЮ)
 # ======================
 def main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -154,7 +186,7 @@ def external_link_keyboard(link: str, label: str = "Открыть"):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"🔗 {label}", url=link)]])
 
 # ======================
-#  GROK API (анализ + ссылки)
+#  GROK API
 # ======================
 async def call_grok_analysis(text: str, history: list = None, profile: dict = None) -> dict:
     if not GROK_API_KEY:
@@ -204,19 +236,19 @@ async def call_openai_primary(user_text, grok_analysis, profile, mood, habits, m
         label = grok_analysis.get("external_link_label", "Открыть")
         link_context = f"\n[Ссылка: {label} — {link}]"
     
-    # 🔥 ОДИН УНИВЕРСАЛЬНЫЙ ПРОМПТ (без режимов)
+    # 🔥 ОДИН УНИВЕРСАЛЬНЫЙ ПРОМПТ
     system_prompt = f"""Ты — личный помощник {user_name if user_name else 'пользователя'}.
 Контекст: настроение={mood}, тема={grok_analysis.get('topic')}, привычки={habit_list}, задач={tasks_count}{link_context}
 
 ПРАВИЛА:
-1. **Практичность**: Давай конкретные советы, не "воду". Пример: "Приложи холод на 15-20 минут, не нагружай ногу"
-2. **Эмпатия**: Если человек в стрессе/грусти — сначала поддержка, потом советы
-3. **Краткость**: 2-4 предложения, по делу
-4. **Естественность**: Отвечай как друг, без "Привет! Чем могу помочь?", "Не стесняйся"
-5. **Без повторов**: Никогда не повторяй один ответ дважды
-6. **Смена темы**: Если видишь "привет"/"отбой"/"стоп" — забудь старое, отвечай на новое
-7. **Юмор**: Можно немного подшутить (доброжелательно), если уместно
-8. **Кризисы**: При серьёзных проблемах — мягко направляй к специалистам
+1. Практичность: Давай конкретные советы ("Приложи холод на 15-20 минут")
+2. Эмпатия: Если стресс — сначала поддержка, потом советы
+3. Краткость: 2-4 предложения, по делу
+4. Естественность: Без "Привет! Чем могу помочь?", "Не стесняйся"
+5. Без повторов: Никогда не повторяй один ответ дважды
+6. Смена темы: Если "привет"/"отбой"/"стоп" — забудь старое
+7. Юмор: Можно подшутить (доброжелательно), если уместно
+8. Кризисы: При серьёзных проблемах — мягко направляй к специалистам
 
 Примеры ХОРОШИХ ответов:
 - "Приложи холод на 15-20 минут через ткань. Не нагружай ногу. Если есть отёк — к врачу. 🩹"
@@ -432,12 +464,17 @@ def parse_ru_command(text:str) -> str|None:
     return None
 
 # ======================
-#  🔥 ОСНОВНОЙ ЧАТ (УПРОЩЁННЫЙ)
+#  🔥 ОСНОВНОЙ ЧАТ (С ИСПРАВЛЕНИЕМ РАСКЛАДКИ)
 # ======================
 @dp.message()
 async def chat(msg:Message, state:FSMContext):
     if not msg.text or await state.get_state(): return
-    uid = msg.from_user.id; text = msg.text.strip()
+    uid = msg.from_user.id
+    original_text = msg.text.strip()
+    
+    # 🔥 Авто-исправление раскладки
+    text = fix_layout(original_text)
+    
     async with db_pool.acquire() as conn: await conn.execute("INSERT INTO users(user_id,name) VALUES ($1,$2) ON CONFLICT DO NOTHING", uid, msg.from_user.first_name)
     await update_last_activity(uid)
     profile = await get_profile(uid)
@@ -455,7 +492,7 @@ async def chat(msg:Message, state:FSMContext):
     memory = await get_memory(uid); mood = await get_mood(uid); habits = await get_habits(uid); tasks_count = (await get_task_stats(uid))["pending"] or 0
     await save_memory(uid,"user",text); await update_emotion(uid,text)
     
-    # 🔥 Парсер команд
+    # 🔥 Парсер команд (на исправленном тексте)
     cmd = parse_ru_command(text)
     if cmd:
         if cmd=="show_menu": await msg.answer("📋 Меню:", reply_markup=main_menu_keyboard()); return
@@ -478,7 +515,7 @@ async def chat(msg:Message, state:FSMContext):
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO message_tags(user_id,message_id,tags,topic) VALUES ($1,$2,$3,$4)", uid, msg.message_id, grok.get("tags",[]), grok.get("topic"))
     
-    # 🔥 Универсальный ответ (без режимов)
+    # 🔥 Универсальный ответ
     answer = await call_openai_primary(text, grok, profile, mood, habits, memory, tasks_count)
     await msg.answer(answer)
 
@@ -513,7 +550,7 @@ async def inactivity_check():
 #  🔥 HEALTH CHECK
 # ======================
 async def health_handler(request):
-    return web.json_response({"status":"ok","bot":"AssistEmpat v2.5"}, headers={"Content-Type":"application/json"})
+    return web.json_response({"status":"ok","bot":"AssistEmpat v2.6"}, headers={"Content-Type":"application/json"})
 
 async def start_health_server():
     app = web.Application()
@@ -530,7 +567,7 @@ async def start_health_server():
 #  🔥 ЗАПУСК
 # ======================
 async def main():
-    logging.info(f"🚀 Starting AssistEmpat v2.5 (port={HEALTH_PORT})")
+    logging.info(f"🚀 Starting AssistEmpat v2.6 (port={HEALTH_PORT})")
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     def handle_signal():
@@ -564,7 +601,7 @@ async def main():
     if stop_event.is_set():
         await cleanup(health_runner)
         return
-    logging.info("✅ AssistEmpat v2.5 ready — STARTING POLLING")
+    logging.info("✅ AssistEmpat v2.6 ready — STARTING POLLING")
     polling_task = asyncio.create_task(dp.start_polling(bot))
     done, pending = await asyncio.wait([polling_task, asyncio.create_task(stop_event.wait())], return_when=asyncio.FIRST_COMPLETED)
     await cleanup(health_runner)
