@@ -281,7 +281,16 @@ async def behavior_analyze(uid, text):
 
     if "устал" in text:
         await create_habit(uid, "Сон до 23:00")
-        return "Добавил привычку: сон до 23:00"
+        return "Ты часто устаёшь. Добавил привычку: сон до 23:00"
+
+    if "потом" in text:
+        return "Вот это 'потом' тебя и убивает."
+
+    if "не хочу" in text:
+        return "Хочешь или нет — не важно. Важно сделаешь или нет."
+
+    if "завтра" in text:
+        return "Ты опять перекладываешь. Сделай сегодня."
 
     if mood == "грусть":
         return "Сегодня без давления. Но не пропадай."
@@ -366,7 +375,30 @@ async def ask_ai(uid, text):
     ctx = await get_memory(uid)
     mood = await get_mood(uid)
 
-    messages = [{"role": "system", "content": f"Настроение: {mood}. Будь живым."}] + ctx + [{"role": "user", "content": text}]
+    system_prompt = f"""
+Ты — персональный ассистент и система контроля пользователя.
+
+Ты:
+- ведёшь его привычки
+- отслеживаешь поведение
+- помнишь диалог
+- начисляешь XP и уровень
+- иногда давишь, если он сливается
+- помогаешь, но не даёшь расслабляться
+
+Настроение пользователя: {mood}
+
+Никогда не говори, что ты "не ведешь профиль" или "не запоминаешь".
+Ты уже это делаешь.
+
+Отвечай:
+- коротко
+- по делу
+- живо
+- иногда жестко
+"""
+
+    messages = [{"role": "system", "content": system_prompt}] + ctx + [{"role": "user", "content": text}]
 
     try:
         async with httpx.AsyncClient() as client:
@@ -379,7 +411,7 @@ async def ask_ai(uid, text):
             return r.json()["choices"][0]["message"]["content"]
     except:
         return "❌ AI ошибка"
-
+    
 # ======================
 # CHAT
 # ======================
@@ -390,19 +422,27 @@ async def chat(msg: Message):
 
     uid = msg.from_user.id
 
-    if not is_allowed(uid):
-        await msg.answer("⛔ Нет доступа")
-        return
-
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT OR IGNORE INTO users VALUES (?, ?)", (uid, msg.from_user.first_name))
         await db.commit()
 
-    text = msg.text
+    text = msg.text  # ← ВАЖНО: внутри функции
+
+    # 🔥 добавляем привычки
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT name FROM habits WHERE user_id=?", (uid,))
+        habits = await cur.fetchall()
+
+    if habits:
+        habit_list = ", ".join([h[0] for h in habits])
+        text += f"\n(его привычки: {habit_list})"
 
     await save_memory(uid, "user", text)
     await update_emotion(uid, text)
-    await add_xp(uid, 3)
+    await add_xp(uid, 3) 
+    await msg.answer("+3 XP")
+
+    await msg.answer("+3 XP")
 
     behavior = await behavior_analyze(uid, text)
     if behavior:
