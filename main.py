@@ -35,7 +35,7 @@ DB_PATH = "bot.db"
 scheduler = AsyncIOScheduler()
 
 # ======================
-# 🔥 REDIS LOCK
+# 🔥 REDIS LOCK (FIXED)
 # ======================
 IS_MAIN = False
 redis_client = None
@@ -45,22 +45,38 @@ async def acquire_lock():
 
     if not REDIS_URL:
         IS_MAIN = True
+        logging.warning("⚠️ NO REDIS → RUNNING AS MAIN")
         return
 
     redis_client = redis.from_url(REDIS_URL)
 
-    lock = await redis_client.set("bot_lock", "1", ex=60, nx=True)
+    try:
+        lock = await redis_client.set("bot_lock", "1", ex=60, nx=True)
 
-    if lock:
+        if lock:
+            IS_MAIN = True
+            logging.info("✅ MAIN INSTANCE (lock acquired)")
+        else:
+            ttl = await redis_client.ttl("bot_lock")
+
+            if ttl == -2:
+                IS_MAIN = True
+                logging.warning("⚠️ LOCK LOST → FORCING MAIN")
+            else:
+                logging.warning(f"⛔ SECONDARY INSTANCE (ttl={ttl})")
+
+    except Exception as e:
         IS_MAIN = True
-        logging.info("✅ MAIN INSTANCE")
-    else:
-        logging.warning("⛔ SECONDARY INSTANCE")
+        logging.error(f"🚨 REDIS FAIL → RUN AS MAIN: {e}")
 
 async def keep_lock_alive():
     while True:
-        if IS_MAIN and redis_client:
-            await redis_client.expire("bot_lock", 60)
+        try:
+            if IS_MAIN and redis_client:
+                await redis_client.expire("bot_lock", 60)
+        except Exception as e:
+            logging.error(f"Lock refresh error: {e}")
+
         await asyncio.sleep(30)
 
 # ======================
@@ -95,9 +111,7 @@ async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript("""
         CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY, name TEXT);
-
         CREATE TABLE IF NOT EXISTS memory(user_id INTEGER, role TEXT, content TEXT);
-
         CREATE TABLE IF NOT EXISTS reminders(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, text TEXT, remind_at TEXT);
 
         CREATE TABLE IF NOT EXISTS habits(
@@ -413,9 +427,12 @@ async def main():
 
     if IS_MAIN:
         scheduler.start()
+        logging.info("🚀 Scheduler started")
+
         scheduler.add_job(retention, "interval", hours=12)
         scheduler.add_job(habit_check, "interval", hours=6)
         scheduler.add_job(morning_ping, "cron", hour=9)
+
         asyncio.create_task(keep_lock_alive())
 
     if IS_MAIN:
