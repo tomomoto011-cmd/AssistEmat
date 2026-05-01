@@ -488,7 +488,37 @@ async def chat(msg: Message):
 # ======================
 async def main():
     await init_db()
-    await acquire_lock()
+    async def acquire_lock():
+     global IS_MAIN, redis_client
+
+    if not REDIS_URL:
+        IS_MAIN = True
+        logging.warning("⚠️ NO REDIS → RUNNING AS MAIN")
+        return
+
+    redis_client = redis.from_url(REDIS_URL)
+
+    try:
+        lock = await redis_client.set("bot_lock", os.getpid(), ex=60, nx=True)
+        logging.info(f"LOCK OWNER: {os.getpid()}")
+
+        if lock:
+            IS_MAIN = True
+            logging.info("✅ MAIN INSTANCE (lock acquired)")
+        else:
+            ttl = await redis_client.ttl("bot_lock")
+
+            # 🔥 если lock почти умер — перехватываем
+            if ttl < 10:
+                await redis_client.set("bot_lock", os.getpid(), ex=60)
+                IS_MAIN = True
+                logging.warning("⚠️ FORCE TAKEOVER LOCK")
+            else:
+                logging.warning(f"⛔ SECONDARY INSTANCE (ttl={ttl})")
+
+    except Exception as e:
+        IS_MAIN = True
+        logging.error(f"🚨 REDIS FAIL → RUN AS MAIN: {e}")
 
     if IS_MAIN:
         scheduler.start()
