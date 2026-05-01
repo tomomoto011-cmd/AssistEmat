@@ -48,7 +48,7 @@ scheduler = AsyncIOScheduler(timezone=timezone.utc)
 db_pool = None
 
 # ======================
-#  🔥 УМНОЕ ИСПРАВЛЕНИЕ РАСКЛАДКИ (только явные случаи)
+#  🔥 УМНОЕ ИСПРАВЛЕНИЕ РАСКЛАДКИ
 # ======================
 LAYOUT_MAP = {
     'q':'й','w':'ц','e':'у','r':'к','t':'е','y':'н','u':'г','i':'ш','o':'щ','p':'з','[':'х',']':'ъ',
@@ -60,19 +60,13 @@ def fix_layout(text: str) -> str:
     """Исправляет раскладку ТОЛЬКО для явных случаев типа 'ghbdtn' → 'привет'"""
     if not text or len(text) < 4:
         return text
-    
-    # Не трогаем, если текст уже содержит русские слова из словаря команд
     safe_words = ['меню', 'инлайн', 'задача', 'привычк', 'напомн', 'погод', 'кино', 'новост', 'курс', 'профиль', 'помощь', 'статистик', 'заметк', 'календар']
     if any(sw in text.lower() for sw in safe_words):
         return text
-    
-    # Проверяем: если текст состоит из английских букв, но при конвертации даёт осмысленные русские слова
     if text.isascii() and text.isalpha():
         converted = ''.join(LAYOUT_MAP.get(c.lower(), c) for c in text)
-        # Если после конвертации есть русские буквы — возвращаем конвертированный
         if any('\u0400' <= c <= '\u04FF' for c in converted):
             return converted
-    
     return text
 
 # ======================
@@ -92,12 +86,13 @@ def should_reset_context(text: str) -> bool:
     return any(kw in text.lower().strip() for kw in RESET_KEYWORDS)
 
 # ======================
-#  БАЗА ДАННЫХ
+#  🔥 БАЗА ДАННЫХ (с миграциями для ВСЕХ таблиц)
 # ======================
 async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
     async with db_pool.acquire() as conn:
+        # 1. Создаём таблицы (если не существуют)
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS users(user_id BIGINT PRIMARY KEY, name TEXT, age INTEGER, gender TEXT, created_at TIMESTAMP DEFAULT NOW());
         CREATE TABLE IF NOT EXISTS memory(id SERIAL PRIMARY KEY, user_id BIGINT, role TEXT, content TEXT, created_at TIMESTAMP DEFAULT NOW());
@@ -111,11 +106,22 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS notes(id SERIAL PRIMARY KEY, user_id BIGINT, content TEXT, created_at TIMESTAMP DEFAULT NOW(), tags TEXT[]);
         CREATE TABLE IF NOT EXISTS calendar_events(id SERIAL PRIMARY KEY, user_id BIGINT, title TEXT, description TEXT, event_date TIMESTAMP, reminder_before INTERVAL, created_at TIMESTAMP DEFAULT NOW());
         """)
+        
+        # 2. Миграции для СТАРЫХ таблиц
         await conn.execute("ALTER TABLE reminders ADD COLUMN IF NOT EXISTS remind_at TIMESTAMP")
         await conn.execute("ALTER TABLE habits ADD COLUMN IF NOT EXISTS streak INTEGER DEFAULT 0")
         await conn.execute("ALTER TABLE habits ADD COLUMN IF NOT EXISTS last_done DATE")
         await conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'medium'")
         await conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS due_date TIMESTAMP")
+        
+        # 3. Миграции для НОВЫХ таблиц (на случай, если созданы ранее без колонок)
+        await conn.execute("ALTER TABLE notes ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()")
+        await conn.execute("ALTER TABLE notes ADD COLUMN IF NOT EXISTS tags TEXT[]")
+        await conn.execute("ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS reminder_before INTERVAL")
+        await conn.execute("ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()")
+        await conn.execute("ALTER TABLE response_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()")
+        
+        # 4. Индексы
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_user ON memory(user_id, created_at DESC)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_habits_user ON habits(user_id)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders(remind_at)")
@@ -123,7 +129,8 @@ async def init_db():
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_response_log ON response_log(user_id, created_at DESC)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_notes_user ON notes(user_id, created_at DESC)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_calendar_user ON calendar_events(user_id, event_date)")
-    logging.info("✅ PostgreSQL initialized + notes/calendar tables")
+        
+    logging.info("✅ PostgreSQL initialized + all migrations applied")
 
 # ======================
 #  🔥 ANTI-LOOP
@@ -196,7 +203,7 @@ async def create_habit(uid, name):
             await conn.execute("INSERT INTO habits(user_id,name) VALUES ($1,$2)", uid, name)
 
 # ======================
-#  INLINE КЛАВИАТУРЫ (ПОЛНОЕ МЕНЮ + УТИЛИТЫ)
+#  INLINE КЛАВИАТУРЫ
 # ======================
 def main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -318,7 +325,6 @@ def get_fallback_response(user_text: str, mood: str) -> str:
     if mood == "грусть": return "Понимаю, что непросто. Расскажи подробнее? Я слушаю. 🤍"
     if mood == "тревога": return "Всё будет хорошо. Что именно беспокоит? Давай разберёмся."
     if mood == "усталость": return "Отдохни. Не перегружай себя. 🫂"
-    # Если пользователь спрашивает про меню/утилиты
     if any(w in user_text.lower() for w in ['меню', 'инлайн', 'кнопк', 'замет', 'календар', 'утилит']):
         return "📋 Меню доступно по кнопкам внизу! Или напиши: /help для списка команд."
     return "Понял. Что ещё нужно?"
@@ -507,7 +513,7 @@ async def cmd_calendar(msg:Message):
     await msg.answer(text, reply_markup=main_menu_keyboard())
 
 # ======================
-#  ХЕНДЛЕРЫ: ЗАДАЧИ (как было)
+#  ХЕНДЛЕРЫ: ЗАДАЧИ
 # ======================
 @dp.message(Command("task"))
 async def cmd_task_start(msg:Message, state:FSMContext): await state.set_state(TaskFSM.title); await msg.answer("📝 Название задачи:")
@@ -529,7 +535,7 @@ async def cmd_tasks(msg:Message):
     await msg.answer(text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
 # ======================
-#  CALLBACKS (ПОЛНОЕ МЕНЮ + УТИЛИТЫ)
+#  CALLBACKS
 # ======================
 @dp.callback_query(F.data=="tasks_list")
 async def cb_tasks(call:CallbackQuery): tasks = await get_tasks(call.from_user.id); text = "📋 Задачи:\n" + "\n".join([f"• {t['title']} | ID:{t['id']}" for t in tasks[:5]]) if tasks else "Нет задач"; await call.message.edit_text(text, reply_markup=main_menu_keyboard())
@@ -575,15 +581,13 @@ def parse_ru_command(text:str) -> str|None:
     return None
 
 # ======================
-#  🔥 ОСНОВНОЙ ЧАТ (С ИСПРАВЛЕНИЕМ РАСКЛАДКИ + УТИЛИТЫ)
+#  🔥 ОСНОВНОЙ ЧАТ
 # ======================
 @dp.message()
 async def chat(msg:Message, state:FSMContext):
     if not msg.text or await state.get_state(): return
     uid = msg.from_user.id
     original_text = msg.text.strip()
-    
-    # 🔥 Умное исправление раскладки (не ломает "меню", "инлайны")
     text = fix_layout(original_text)
     
     async with db_pool.acquire() as conn: await conn.execute("INSERT INTO users(user_id,name) VALUES ($1,$2) ON CONFLICT DO NOTHING", uid, msg.from_user.first_name)
@@ -595,7 +599,6 @@ async def chat(msg:Message, state:FSMContext):
             await save_profile(uid,name,age,gender); profile = {"name":name,"age":age,"gender":gender}
             await msg.answer(f"Запомнил: {name}" if name else "Запомнил тебя"); return
     
-    # 🔥 Сброс контекста
     if should_reset_context(text) or any(kw in text.lower() for kw in FRUSTRATION_KEYWORDS):
         async with db_pool.acquire() as conn:
             await conn.execute("DELETE FROM memory WHERE user_id=$1 AND id IN (SELECT id FROM memory WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5)", uid)
@@ -603,7 +606,6 @@ async def chat(msg:Message, state:FSMContext):
     memory = await get_memory(uid); mood = await get_mood(uid); habits = await get_habits(uid); tasks_count = (await get_task_stats(uid))["pending"] or 0
     await save_memory(uid,"user",text); await update_emotion(uid,text)
     
-    # 🔥 Парсер команд (на исправленном тексте)
     cmd = parse_ru_command(text)
     if cmd:
         if cmd=="show_menu": await msg.answer("📋 Меню:", reply_markup=main_menu_keyboard()); return
@@ -630,7 +632,6 @@ async def chat(msg:Message, state:FSMContext):
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO message_tags(user_id,message_id,tags,topic) VALUES ($1,$2,$3,$4)", uid, msg.message_id, grok.get("tags",[]), grok.get("topic"))
     
-    # 🔥 Универсальный ответ
     answer = await call_openai_primary(text, grok, profile, mood, habits, memory, tasks_count)
     await msg.answer(answer)
 
@@ -656,13 +657,8 @@ async def task_reminder_check():
         try: await bot.send_message(task["user_id"], f"⏰ Скоро дедлайн: {task['title']}")
         except: pass
 async def calendar_reminder_check():
-    """Проверяет события календаря"""
     async with db_pool.acquire() as conn:
-        events = await conn.fetch("""
-            SELECT user_id, title, event_date, reminder_before FROM calendar_events 
-            WHERE event_date <= NOW() + INTERVAL '1 hour' 
-            AND event_date > NOW() - INTERVAL '1 hour'
-        """)
+        events = await conn.fetch("SELECT user_id, title, event_date, reminder_before FROM calendar_events WHERE event_date <= NOW() + INTERVAL '1 hour' AND event_date > NOW() - INTERVAL '1 hour'")
     for e in events:
         try: await bot.send_message(e["user_id"], f"📅 Скоро: {e['title']} ({e['event_date'].strftime('%H:%M')})")
         except: pass
