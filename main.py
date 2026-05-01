@@ -1,5 +1,5 @@
 # =========================================================
-#  ASSISTEMPAT BOT v2.7.1 (Fixed Filters + Full Code)
+#  ASSISTEMPAT BOT v2.7.2 (Fixed Filters v2 + Full Code)
 #  Архитектура: Grok (анализ) + OpenAI (универсальный ответ)
 #  Утилиты: Заметки / Календарь / Задачи / Привычки / Напоминания
 # =========================================================
@@ -438,12 +438,18 @@ async def cmd_stats(msg:Message):
     await msg.answer(text, parse_mode="Markdown")
 
 # ======================
-#  ХЕНДЛЕРЫ: ЗАМЕТКИ (🔥 ИСПРАВЛЕНО: добавлен F.text)
+#  ХЕНДЛЕРЫ: ЗАМЕТКИ (🔥 ИСПРАВЛЕНО: раздельные хендлеры)
 # ======================
-@dp.message(F.text, Command("note") | F.text.regexp(r"(?i)(заметк|запиш|сохрани).*:"))
+@dp.message(Command("note"))
 async def cmd_note_start(msg:Message, state:FSMContext):
     await state.set_state(NoteFSM.content)
     await msg.answer("📝 Что записать в заметку? (или /skip для отмены)")
+
+@dp.message(lambda m: m.text and re.search(r'(?i)(заметк|запиш|сохрани).*:', m.text))
+async def text_note_start(msg:Message, state:FSMContext):
+    await state.set_state(NoteFSM.content)
+    await msg.answer("📝 Что записать в заметку? (или /skip для отмены)")
+
 @dp.message(NoteFSM.content, F.text=="/skip")
 async def note_skip(msg:Message, state:FSMContext): await state.clear(); await msg.answer("❌ Отменено")
 @dp.message(NoteFSM.content)
@@ -472,12 +478,18 @@ async def cmd_notes(msg:Message):
     await msg.answer(text, reply_markup=main_menu_keyboard())
 
 # ======================
-#  ХЕНДЛЕРЫ: КАЛЕНДАРЬ (🔥 ИСПРАВЛЕНО: добавлен F.text)
+#  ХЕНДЛЕРЫ: КАЛЕНДАРЬ (🔥 ИСПРАВЛЕНО: раздельные хендлеры)
 # ======================
-@dp.message(F.text, Command("event") | F.text.regexp(r"(?i)(событи|встреч|план|календар).*:"))
+@dp.message(Command("event"))
 async def cmd_event_start(msg:Message, state:FSMContext):
     await state.set_state(CalendarFSM.title)
     await msg.answer("📅 Название события:")
+
+@dp.message(lambda m: m.text and re.search(r'(?i)(событи|встреч|план|календар).*:', m.text))
+async def text_event_start(msg:Message, state:FSMContext):
+    await state.set_state(CalendarFSM.title)
+    await msg.answer("📅 Название события:")
+
 @dp.message(CalendarFSM.title)
 async def event_title(msg:Message, state:FSMContext):
     await state.update_data(title=msg.text)
@@ -668,7 +680,7 @@ async def inactivity_check():
 #  🔥 HEALTH CHECK
 # ======================
 async def health_handler(request):
-    return web.json_response({"status":"ok","bot":"AssistEmpat v2.7.1"}, headers={"Content-Type":"application/json"})
+    return web.json_response({"status":"ok","bot":"AssistEmpat v2.7.2"}, headers={"Content-Type":"application/json"})
 async def start_health_server():
     app = web.Application()
     app.router.add_get('/health', health_handler)
@@ -684,7 +696,7 @@ async def start_health_server():
 #  🔥 ЗАПУСК
 # ======================
 async def main():
-    logging.info(f"🚀 Starting AssistEmpat v2.7.1 (port={HEALTH_PORT})")
+    logging.info(f"🚀 Starting AssistEmpat v2.7.2 (port={HEALTH_PORT})")
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     def handle_signal():
@@ -719,7 +731,7 @@ async def main():
     if stop_event.is_set():
         await cleanup(health_runner)
         return
-    logging.info("✅ AssistEmpat v2.7.1 ready — STARTING POLLING")
+    logging.info("✅ AssistEmpat v2.7.2 ready — STARTING POLLING")
     polling_task = asyncio.create_task(dp.start_polling(bot))
     done, pending = await asyncio.wait([polling_task, asyncio.create_task(stop_event.wait())], return_when=asyncio.FIRST_COMPLETED)
     await cleanup(health_runner)
