@@ -414,6 +414,22 @@ async def ask_ai(uid, text):
         return "❌ AI ошибка"
     
 # ======================
+# UTILS
+# ======================
+def is_meaningful(text: str):
+    text = text.lower().strip()
+
+    if len(text) < 5:
+        return False
+
+    garbage = ["ыва", "asdf", "123", "qwe"]
+    if any(g in text for g in garbage):
+        return False
+
+    return True
+
+
+# ======================
 # CHAT
 # ======================
 @dp.message()
@@ -424,41 +440,49 @@ async def chat(msg: Message):
     uid = msg.from_user.id
 
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR IGNORE INTO users VALUES (?, ?)", (uid, msg.from_user.first_name))
+        await db.execute(
+            "INSERT OR IGNORE INTO users VALUES (?, ?)",
+            (uid, msg.from_user.first_name)
+        )
         await db.commit()
 
-    text = msg.text  # ← ВАЖНО: внутри функции
+    text = msg.text
 
-    # 🔥 добавляем привычки
+    # 🔥 добавляем привычки в контекст
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT name FROM habits WHERE user_id=?", (uid,))
+        cur = await db.execute(
+            "SELECT name FROM habits WHERE user_id=?",
+            (uid,)
+        )
         habits = await cur.fetchall()
 
     if habits:
         habit_list = ", ".join([h[0] for h in habits])
         text += f"\n(его привычки: {habit_list})"
 
+    # сохраняем память и эмоции
     await save_memory(uid, "user", text)
     await update_emotion(uid, text)
-    await add_xp(uid, 3) 
-    await msg.answer("+3 XP")
 
-    await msg.answer("+3 XP")
+    # ======================
+    # XP (ТОЛЬКО ЗА ОСМЫСЛЕННОЕ)
+    # ======================
+    if is_meaningful(text):
+        await add_xp(uid, 3)
+        await msg.answer("+3 XP")
 
+    # ======================
+    # BEHAVIOR
+    # ======================
     behavior = await behavior_analyze(uid, text)
     if behavior:
         await msg.answer(behavior)
 
+    # ======================
+    # AI
+    # ======================
     answer = await ask_ai(uid, text)
     await msg.answer(answer)
-
-# ======================
-# START
-# ======================
-@dp.message(CommandStart())
-async def start(msg: Message):
-    await msg.answer("Привет 👋")
-
 # ======================
 # MAIN
 # ======================
