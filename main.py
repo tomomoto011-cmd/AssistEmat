@@ -51,7 +51,8 @@ async def acquire_lock():
     redis_client = redis.from_url(REDIS_URL)
 
     try:
-        lock = await redis_client.set("bot_lock", "1", ex=60, nx=True)
+        lock = await redis_client.set("bot_lock", os.getpid(), ex=60, nx=True)
+        logging.info(f"LOCK OWNER: {os.getpid()}")
 
         if lock:
             IS_MAIN = True
