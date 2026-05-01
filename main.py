@@ -586,82 +586,86 @@ async def inactivity_check():
     for u in users:
         try: await bot.send_message(u["user_id"], "Давно не виделись. Как дела?")
         except: pass
+# ======================
+#  🔥 HEALTH CHECK ENDPOINT (для Railway)
+# ======================
+from aiohttp import web
 
+async def health_handler(request):
+    return web.json_response({"status": "ok", "bot": "AssistEmpat v2.4"})
+
+async def start_health_server():
+    """Запускает минимальный HTTP-сервер для health-check"""
+    app = web.Application()
+    app.router.add_get('/health', health_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    logging.info("🏥 Health server started on port 8080")
+    return runner
 
 # ======================
-#  ЗАПУСК (ОПТИМИЗИРОВАН)
+#  ЗАПУСК (с health-сервером)
 # ======================
 async def main():
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     
-    # 🔥 Обработка сигналов ДО инициализации
     def handle_signal():
-        logging.info("🛑 Signal received, preparing to stop...")
+        logging.info("🛑 Signal received")
         stop_event.set()
     
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, handle_signal)
     
-    # 🔥 Быстрая инициализация (без лишних логов)
+    # 🔥 Быстрая инициализация
     try:
         await init_db()
     except Exception as e:
         logging.error(f"❌ DB init failed: {e}")
-        return  # Выходим, чтобы Railway не ждал
+        return
     
-    # 🔥 Минимальные задачи планировщика на старте
+    # 🔥 Запускаем health-сервер для Railway
+    health_runner = None
+    if os.getenv("RAILWAY") or os.getenv("PORT"):  # Если запущено на Railway/с портом
+        try:
+            health_runner = await start_health_server()
+        except Exception as e:
+            logging.warning(f"⚠️ Could not start health server: {e}")
+    
     scheduler.start()
-    scheduler.add_job(morning_ping, "cron", hour=9)  # Только самое важное
-    # Остальные задачи добавятся при первом запуске
+    scheduler.add_job(morning_ping, "cron", hour=9)
+    scheduler.add_job(habit_check, "interval", hours=6)
+    scheduler.add_job(task_reminder_check, "interval", minutes=30)
+    scheduler.add_job(inactivity_check, "interval", hours=24)
     
-    # 🔥 Очистка вебхуков + микро-пауза для Railway
     await bot.delete_webhook(drop_pending_updates=True)
-    await asyncio.sleep(0.5)  # Даём Railway время на health-check
+    await asyncio.sleep(0.5)
     
-    # 🔥 Проверка: не пришёл ли SIGTERM пока инициализировались
     if stop_event.is_set():
-        logging.info("⚠️ Stopping before polling (signal received during init)")
-        await cleanup()
+        await cleanup(health_runner)
         return
     
     logging.info("✅ AssistEmpat v2.4 ready — starting polling")
-    
-    # 🔥 Запуск polling в отдельной задаче
     polling_task = asyncio.create_task(dp.start_polling(bot))
     
-    # 🔥 Ждём либо остановки, либо падения polling
     done, pending = await asyncio.wait(
         [polling_task, asyncio.create_task(stop_event.wait())],
         return_when=asyncio.FIRST_COMPLETED
     )
     
-    # 🔥 Корректная остановка
-    await cleanup()
-    
-    # Отменяем зависшие задачи
+    await cleanup(health_runner)
     for task in pending:
         task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        try: await task
+        except asyncio.CancelledError: pass
 
-async def cleanup():
-    """Корректное закрытие соединений"""
+async def cleanup(health_runner=None):
+    """Корректное закрытие"""
     logging.info("👋 Cleaning up...")
-    if db_pool:
-        await db_pool.close()
-    if bot.session:
-        await bot.session.close()
+    if db_pool: await db_pool.close()
+    if bot.session: await bot.session.close()
+    if health_runner: await health_runner.cleanup()
     scheduler.shutdown(wait=False)
     logging.info("✅ Cleanup complete")
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("👋 Stopped by user")
-    except Exception as e:
-        logging.error(f"💥 Fatal error: {e}")
-        raise
