@@ -1,8 +1,7 @@
 # =========================================================
-#  ASSISTEMPAT BOT v2.3 (OpenAI-primary + smart commands)
-#  Архитектура: Grok (анализ) + OpenAI (основной ответ)
-#  БД: Neon PostgreSQL + задачи + inline-кнопки
-#  Внешние данные: ссылки на Яндекс (погода, кино, курсы)
+#  ASSISTEMPAT BOT v2.4 (Adaptive personality + Practical help)
+#  Архитектура: Grok (анализ) + OpenAI (адаптивный ответ)
+#  Режимы: Здоровье (сухой) / Психология (эмпат) / Секретарь (позитив) / Болтовня (юмор)
 # =========================================================
 
 import asyncio
@@ -12,6 +11,7 @@ import re
 import signal
 import json
 import urllib.parse
+import hashlib
 from datetime import datetime, timedelta, timezone, date
 
 from aiogram import Bot, Dispatcher, F
@@ -35,8 +35,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # 🔥 OpenAI — основной
-QWEN_API_KEY = os.getenv("QWEN_API_KEY")  # опциональный фоллбэк
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+QWEN_API_KEY = os.getenv("QWEN_API_KEY")
 CITY_DEFAULT = os.getenv("CITY_DEFAULT", "Москва")
 ALLOWED_USERS = os.getenv("ALLOWED_USERS", "")
 
@@ -46,6 +46,39 @@ scheduler = AsyncIOScheduler(timezone=timezone.utc)
 db_pool = None
 
 # ======================
+#  🔥 ДЕТЕКТОР РЕЖИМОВ И КРИЗИСОВ
+# ======================
+HEALTH_KEYWORDS = ["бол", "слом", "перелом", "ушиб", "рана", "кров", "травм", "ожог", "температур", "давлен", "сердц", "голова", "живот", "тошн", "лекарств", "таблетк"]
+PSYCHO_KEYWORDS = ["отнош", "ссора", "конфликт", "не понимаю", "устал от", "депресс", "тревож", "стресс", "одиноч", "не могу найти", "почему он", "почему она", "как быть", "что делать"]
+SECRETARY_KEYWORDS = ["напомн", "задач", "список", "план", "встреч", "дел", "запиш", "сохрани", "привычк", "трекер", "статистик"]
+FRUSTRATION_KEYWORDS = ["скотина", "бесчувственный", "бездушный", "ты тупой", "ты не понимаешь", "опять", "достал", "хватит", "бесит", "раздража"]
+RESET_KEYWORDS = ["привет", "здравствуй", "отбой", "стоп", "новое", "другое", "меню", "пока", "до свидания"]
+
+def detect_mode(text: str) -> str:
+    """Определяет режим: health/psychology/secretary/chat"""
+    text_lower = text.lower()
+    if any(kw in text_lower for kw in HEALTH_KEYWORDS):
+        return "health"
+    if any(kw in text_lower for kw in PSYCHO_KEYWORDS):
+        return "psychology"
+    if any(kw in text_lower for kw in SECRETARY_KEYWORDS):
+        return "secretary"
+    return "chat"
+
+def is_crisis(text: str) -> tuple[bool, str]:
+    """Проверяет на критические ситуации"""
+    text_lower = text.lower()
+    if any(w in text_lower for w in ["суицид", "умер", "не хочу жить", "убить себя"]):
+        return True, "critical"
+    if any(w in text_lower for w in ["паник", "не могу дышать", "сердце", "давление"]):
+        return True, "medical_emergency"
+    return False, ""
+
+def should_reset_context(text: str) -> bool:
+    """Сбросить контекст?"""
+    return any(kw in text.lower().strip() for kw in RESET_KEYWORDS)
+
+# ======================
 #  БАЗА ДАННЫХ
 # ======================
 async def init_db():
@@ -53,58 +86,68 @@ async def init_db():
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
     async with db_pool.acquire() as conn:
         await conn.execute("""
-        CREATE TABLE IF NOT EXISTS users(user_id BIGINT PRIMARY KEY, name TEXT, created_at TIMESTAMP DEFAULT NOW());
+        CREATE TABLE IF NOT EXISTS users(user_id BIGINT PRIMARY KEY, name TEXT, age INTEGER, gender TEXT, created_at TIMESTAMP DEFAULT NOW());
         CREATE TABLE IF NOT EXISTS memory(id SERIAL PRIMARY KEY, user_id BIGINT, role TEXT, content TEXT, created_at TIMESTAMP DEFAULT NOW());
         CREATE TABLE IF NOT EXISTS reminders(id SERIAL PRIMARY KEY, user_id BIGINT, text TEXT, remind_at TIMESTAMP);
         CREATE TABLE IF NOT EXISTS habits(id SERIAL PRIMARY KEY, user_id BIGINT, name TEXT, streak INTEGER DEFAULT 0, last_done DATE);
         CREATE TABLE IF NOT EXISTS emotions(id SERIAL PRIMARY KEY, user_id BIGINT, mood TEXT, created_at TIMESTAMP DEFAULT NOW());
         CREATE TABLE IF NOT EXISTS last_activity(user_id BIGINT PRIMARY KEY, last_time TIMESTAMP DEFAULT NOW());
-        CREATE TABLE IF NOT EXISTS profile(user_id BIGINT PRIMARY KEY, name TEXT, age INTEGER, gender TEXT);
         CREATE TABLE IF NOT EXISTS message_tags(id SERIAL PRIMARY KEY, user_id BIGINT, message_id BIGINT, tags TEXT[], topic TEXT, created_at TIMESTAMP DEFAULT NOW());
         CREATE TABLE IF NOT EXISTS tasks(id SERIAL PRIMARY KEY, user_id BIGINT, title TEXT, description TEXT, status TEXT DEFAULT 'pending', priority TEXT DEFAULT 'medium', due_date TIMESTAMP, created_at TIMESTAMP DEFAULT NOW());
+        CREATE TABLE IF NOT EXISTS response_log(id SERIAL PRIMARY KEY, user_id BIGINT, content_hash TEXT, created_at TIMESTAMP DEFAULT NOW());
         """)
         await conn.execute("ALTER TABLE reminders ADD COLUMN IF NOT EXISTS remind_at TIMESTAMP")
         await conn.execute("ALTER TABLE habits ADD COLUMN IF NOT EXISTS streak INTEGER DEFAULT 0")
         await conn.execute("ALTER TABLE habits ADD COLUMN IF NOT EXISTS last_done DATE")
-        await conn.execute("ALTER TABLE profile ADD COLUMN IF NOT EXISTS age INTEGER")
-        await conn.execute("ALTER TABLE profile ADD COLUMN IF NOT EXISTS gender TEXT")
         await conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'medium'")
         await conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS due_date TIMESTAMP")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_user ON memory(user_id, created_at DESC)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_habits_user ON habits(user_id)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders(remind_at)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id, status)")
-    logging.info("✅ PostgreSQL initialized")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_response_log ON response_log(user_id, created_at DESC)")
+    logging.info("✅ PostgreSQL initialized + response_log table added")
+
+# ======================
+#  🔥 ANTI-LOOP: защита от повторов
+# ======================
+async def is_duplicate_response(uid: int, new_text: str) -> bool:
+    """Проверяет, не повторял ли бот такой ответ недавно"""
+    if not new_text or len(new_text.strip()) < 5:
+        return False
+    new_hash = hashlib.md5(new_text.strip().lower().encode()).hexdigest()
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT content_hash FROM response_log WHERE user_id=$1 ORDER BY created_at DESC LIMIT 3", uid)
+        hashes = [r["content_hash"] for r in rows]
+        if new_hash in hashes:
+            logging.warning(f"🔄 Duplicate response detected for user {uid}")
+            return True
+        await conn.execute("INSERT INTO response_log(user_id, content_hash) VALUES ($1, $2)", uid, new_hash)
+        await conn.execute("DELETE FROM response_log WHERE user_id=$1 AND id NOT IN (SELECT id FROM response_log WHERE user_id=$1 ORDER BY created_at DESC LIMIT 20)", uid)
+    return False
 
 # ======================
 #  ССЫЛКИ НА ВНЕШНИЕ РЕСУРСЫ
 # ======================
-def get_weather_link(city: str) -> str:
-    return f"https://yandex.ru/pogoda/{urllib.parse.quote(city)}"
-def get_currency_link() -> str:
-    return "https://www.cbr.ru/currency_base/daily/"
-def get_cinema_link(city: str = "Москва") -> str:
-    return f"https://afisha.yandex.ru/{urllib.parse.quote(city)}/cinema/"
-def get_news_link() -> str:
-    return "https://news.yandex.ru/"
-def get_translate_link() -> str:
-    return "https://translate.yandex.ru/"
+def get_weather_link(city: str) -> str: return f"https://yandex.ru/pogoda/{urllib.parse.quote(city)}"
+def get_currency_link() -> str: return "https://www.cbr.ru/currency_base/daily/"
+def get_cinema_link(city: str = "Москва") -> str: return f"https://afisha.yandex.ru/{urllib.parse.quote(city)}/cinema/"
+def get_news_link() -> str: return "https://news.yandex.ru/"
+def get_translate_link() -> str: return "https://translate.yandex.ru/"
 
 # ======================
 #  ЗАДАЧИ
 # ======================
 async def create_task(uid, title, description=None, priority="medium", due_date=None):
     async with db_pool.acquire() as conn:
-        return await conn.fetchval("INSERT INTO tasks(user_id, title, description, priority, due_date) VALUES ($1,$2,$3,$4,$5) RETURNING id", uid, title, description, priority, due_date)
+        return await conn.fetchval("INSERT INTO tasks(user_id,title,description,priority,due_date) VALUES ($1,$2,$3,$4,$5) RETURNING id", uid, title, description, priority, due_date)
 async def get_tasks(uid, status="pending"):
     async with db_pool.acquire() as conn:
         return await conn.fetch("SELECT id,title,description,priority,due_date,created_at FROM tasks WHERE user_id=$1 AND status=$2 ORDER BY created_at DESC", uid, status)
 async def complete_task(uid, task_id):
-    async with db_pool.acquire() as conn:
-        await conn.execute("UPDATE tasks SET status='completed' WHERE id=$1 AND user_id=$2", task_id, uid)
+    async with db_pool.acquire() as conn: await conn.execute("UPDATE tasks SET status='completed' WHERE id=$1 AND user_id=$2", task_id, uid)
 async def delete_task(uid, task_id):
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM tasks WHERE id=$1 AND user_id=$2", task_id, uid)
+    async with db_pool.acquire() as conn: await conn.execute("DELETE FROM tasks WHERE id=$1 AND user_id=$2", task_id, uid)
 async def get_task_stats(uid):
     async with db_pool.acquire() as conn:
         return await conn.fetchrow("SELECT COUNT(*) FILTER (WHERE status='pending') as pending, COUNT(*) FILTER (WHERE status='completed') as completed FROM tasks WHERE user_id=$1", uid)
@@ -127,11 +170,11 @@ def external_link_keyboard(link: str, label: str = "Открыть"):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"🔗 {label}", url=link)]])
 
 # ======================
-#  GROK API (анализ + определение ссылок)
+#  GROK API (анализ + режимы)
 # ======================
 async def call_grok_analysis(text: str, history: list = None, profile: dict = None) -> dict:
     if not GROK_API_KEY:
-        return {"topic":"general","tags":[],"intent":"chat","emotional_tone":"neutral","action_items":[],"priority":"medium","refined_prompt":text,"is_task_creation":False,"external_link_needed":None,"external_link":None}
+        return {"topic":"general","tags":[],"intent":"chat","emotional_tone":"neutral","action_items":[],"priority":"medium","refined_prompt":text,"is_task_creation":False,"external_link_needed":None,"external_link":None,"mode":"chat"}
     try:
         history_ctx = "\n".join([f"{m['role']}: {m['content']}" for m in (history or [])[-5:]])
         user_info = f"Имя:{profile.get('name')},Возраст:{profile.get('age')},Пол:{profile.get('gender')}" if profile else ""
@@ -139,7 +182,7 @@ async def call_grok_analysis(text: str, history: list = None, profile: dict = No
 Пользователь:{user_info}
 Сообщение:{text}
 История:{history_ctx}
-Формат:{{"topic":"работа|учеба|здоровье|отношения|эмоции|быт|задача|погода|кино|финансы|новости|другое","tags":[],"intent":"chat|question|task|request_help|create_task|request_external_link","emotional_tone":"neutral|positive|negative|stressed|tired","action_items":[],"priority":"low|medium|high","refined_prompt":"...","is_task_creation":true/false,"external_link_needed":null|"weather"|"currency"|"cinema"|"news"|"translate","external_link_params":{{"city":"..."}} или null}}"""
+Формат:{{"topic":"работа|учеба|здоровье|отношения|эмоции|быт|задача|погода|кино|финансы|новости|кризис|другое","tags":[],"intent":"chat|question|task|request_help|create_task|request_external_link|crisis_support","emotional_tone":"neutral|positive|negative|stressed|tired|distressed|angry","action_items":[],"priority":"low|medium|high|critical","refined_prompt":"...","is_task_creation":true/false,"external_link_needed":null|"weather"|"currency"|"cinema"|"news"|"translate","external_link_params":{{"city":"..."}} или null,"mode":"health|psychology|secretary|chat"}}"""
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post("https://api.x.ai/v1/chat/completions", headers={"Authorization":f"Bearer {GROK_API_KEY}","Content-Type":"application/json"}, json={"model":"grok-beta","messages":[{"role":"user","content":prompt}],"temperature":0.3})
             r.raise_for_status()
@@ -161,50 +204,100 @@ async def call_grok_analysis(text: str, history: list = None, profile: dict = No
             return data
     except Exception as e:
         logging.error(f"Grok error: {e}")
-        return {"topic":"general","tags":[],"intent":"chat","emotional_tone":"neutral","action_items":[],"priority":"medium","refined_prompt":text,"is_task_creation":False,"external_link_needed":None,"external_link":None}
+        return {"topic":"general","tags":[],"intent":"chat","emotional_tone":"neutral","action_items":[],"priority":"medium","refined_prompt":text,"is_task_creation":False,"external_link_needed":None,"external_link":None,"mode":"chat"}
 
 # ======================
-#  OPENAI (ОСНОВНОЙ ОТВЕТ) — через OpenRouter
+#  🔥 OPENAI (АДАПТИВНЫЙ ПОДХОД)
 # ======================
-async def call_openai_primary(user_text, grok_analysis, profile, mood, habits, memory, tasks_count=0):
+async def call_openai_primary(user_text, grok_analysis, profile, mood, habits, memory, tasks_count=0, mode="chat"):
     if not OPENROUTER_API_KEY:
         return await call_qwen_fallback(user_text, grok_analysis, profile, mood, habits, memory, tasks_count)
     
     user_name = profile.get("name") if profile else ""
     habit_list = ", ".join([h[0] for h in habits]) if habits else "не заданы"
     
-    # Блок с ссылкой для контекста
     link_context = ""
     if grok_analysis.get("external_link"):
         link = grok_analysis["external_link"]
         label = grok_analysis.get("external_link_label", "Открыть")
-        link_context = f"\n[Ссылка для пользователя: {label} — {link}]"
+        link_context = f"\n[Ссылка: {label} — {link}]"
+    
+    # 🔥 АДАПТИВНЫЙ ПРОМПТ ПОД РЕЖИМ
+    if mode == "health":
+        mode_instruction = """
+🏥 РЕЖИМ: ЗДОРОВЬЕ (практический помощник)
+- Сухой, конкретный, без "воды"
+- ДАЙ ПРАКТИЧЕСКИЕ СОВЕТЫ: "приложи холод на 15-20 минут", "не нагружай", "проверь на отёк", "осмотри на наличие открытых ран"
+- Если серьёзно: "Срочно вызови скорую (103)" или "Обратись к врачу сегодня"
+- НЕ повторяй "обратись к врачу" без конкретики
+- Эмодзи: 🩹🤒💊 (максимум 1)
+Примеры:
+ХОРОШО: "Приложи холод на 15-20 минут через ткань. Не нагружай ногу. Если есть отёк или не можешь наступать — срочно к травматологу. 🩹"
+ПЛОХО: "Обратись к врачу" (без деталей)
+"""
+    elif mode == "psychology":
+        mode_instruction = """
+🧠 РЕЖИМ: ПСИХОЛОГИЯ (эмпатичный советник)
+- Задавай уточняющие вопросы: "Что именно произошло?", "Как ты себя чувствуешь?"
+- Помоги найти решение, а не просто выслушай
+- Не сюсюкай, но будь поддерживающим
+- Если кризис: "Ты не один. Позвони близким или на горячую линию (8-800-2000-122)"
+- Эмодзи: 🤍💙 (редко)
+Примеры:
+ХОРОШО: "Понимаю, что тяжело. Расскажи, что именно произошло? Давай разберёмся по шагам."
+ПЛОХО: "Я здесь чтобы поддержать тебя" (шаблон)
+"""
+    elif mode == "secretary":
+        mode_instruction = """
+💼 РЕЖИМ: СЕКРЕТАРЬ (позитивный исполнитель)
+- Отвечай энергично: "Да, босс!", "Вас понял!", "Принято и сделано!", "Выполняю!"
+- Подтверждай действия: "Записал!", "Напомню в...", "Добавил в задачи!"
+- Будь кратким и позитивным
+- Эмодзи: ✅📝
+Примеры:
+ХОРОШО: "Да, босс! Записал: выпить воду через 2 часа. Напомню! ✅"
+ХОРОШО: "Принято! Задача добавлена. Срок — завтра в 18:00. 👍"
+"""
+    else:  # chat
+        mode_instruction = """
+💬 РЕЖИМ: БОЛТОВНЯ (дружеский собеседник)
+- Можешь немного подшутить (доброжелательно)
+- Отвечай как друг, не как робот
+- Зеркаль настроение: если пользователь весёлый — будь веселее, если серьёзный — серьёзнее
+- Не повторяй шаблонные фразы
+- Эмодзи: по ситуации (максимум 1-2)
+Примеры:
+ХОРОШО: "Ха, ну ты даёшь! 😄 Ладно, расскажи, что стряслось?"
+ХОРОШО: "Понял тебя. Ну что, разбираемся с местоимениями? Они заменяют существительные: я, ты, он..."
+"""
     
     system_prompt = f"""Ты — личный помощник {user_name if user_name else 'пользователя'}.
 Контекст: настроение={mood}, тема={grok_analysis.get('topic')}, привычки={habit_list}, задач={tasks_count}{link_context}
 
-ПРАВИЛА:
-1. Отвечай как живой человек — НИКАКИХ "Привет!", "Я здесь чтобы помочь", "Не стесняйся"
-2. Если есть [Ссылка для пользователя] — предложи её кратко: "Погоду смотри тут: [кнопка]"
-3. Коротко, по делу. Максимум 3-4 предложения
-4. Если вопрос по учебе/работе — дай конкретный ответ, не спрашивай "что именно?"
-5. Эмодзи — максимум 1, только если уместно
-6. Не повторяй одно и то же в соседних сообщениях
+{mode_instruction}
 
-Примеры ХОРОШИХ ответов:
-- "Понял. Местоимения заменяют существительные: я, ты, он, она. Суффиксы — это части слова после корня, например -ик-, -ок-."
-- "Погоду в Волгограде смотри тут: [кнопка]. Одевайся теплее, там +5°."
-- "Задачу создал. Срок — завтра в 18:00."
+🔥 ОБЩИЕ ПРАВИЛА:
+1. НИКОГДА не повторяй один и тот же ответ дважды подряд
+2. Если видишь "привет", "отбой", "стоп" — это СМЕНА ТЕМЫ. Забудь старое.
+3. Отвечай как живой человек — без "Привет! Чем могу помочь?", "Не стесняйся"
+4. Коротко, по делу (2-4 предложения, кроме психологии — там можно больше)
+5. Если вопрос по учебе/работе — дай конкретный ответ
 
-Примеры ПЛОХИХ (никогда не пиши):
-- "Привет! Как могу помочь?"
-- "Я здесь чтобы поддержать тебя"
-- "Расскажи подробнее, что именно нужно?"
-
-Отвечай естественно, как в обычном чате."""
+Отвечай естественно."""
     
-    context = "\n".join([f"{m['role']}: {m['content']}" for m in memory[-10:]])
-    messages = [{"role":"system","content":system_prompt},{"role":"user","content":f"Диалог:\n{context}\n\nСообщение:{user_text}"}]
+    # Фильтруем память (уникальные сообщения)
+    filtered_memory = []
+    seen = set()
+    for msg in reversed(memory[-12:]):
+        content = msg["content"].strip()
+        if content and len(content) > 3 and content not in seen:
+            filtered_memory.insert(0, msg)
+            seen.add(content)
+        if len(filtered_memory) >= 6:
+            break
+    
+    context = "\n".join([f"{m['role']}: {m['content']}" for m in filtered_memory])
+    messages = [{"role":"system","content":system_prompt},{"role":"user","content":f"Диалог:\n{context}\n\nТекущее:{user_text}"}]
     
     try:
         async with httpx.AsyncClient(timeout=20) as client:
@@ -212,20 +305,33 @@ async def call_openai_primary(user_text, grok_analysis, profile, mood, habits, m
                 headers={"Authorization":f"Bearer {OPENROUTER_API_KEY}","Content-Type":"application/json"},
                 json={"model":"openai/gpt-4o-mini","messages":messages,"temperature":0.7,"max_tokens":400}, timeout=20)
             r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"].strip()
+            answer = r.json()["choices"][0]["message"]["content"].strip()
+            
+            # Проверка на дубликат
+            if await is_duplicate_response(profile.get("user_id") if profile else 0, answer):
+                logging.warning("🔄 Duplicate detected, using fallback")
+                return get_fallback_response(user_text, mood, mode)
+            
+            return answer
     except Exception as e:
         logging.error(f"OpenRouter error: {e}")
-        return await call_qwen_fallback(user_text, grok_analysis, profile, mood, habits, memory, tasks_count)
+        return get_fallback_response(user_text, mood, mode)
 
-# ======================
-#  QWEN (фоллбэк, если OpenAI недоступен)
-# ======================
+def get_fallback_response(user_text: str, mood: str, mode: str) -> str:
+    """Запасные ответы"""
+    if mode == "health":
+        return "Приложи холод на 15-20 минут. Не нагружай. Если не проходит — к врачу. 🩹"
+    if mode == "psychology":
+        return "Понимаю, что непросто. Расскажи подробнее, что произошло? Я слушаю. 🤍"
+    if mode == "secretary":
+        return "Принято! Сделаю! ✅"
+    return "Понял. Что ещё нужно?"
+
 async def call_qwen_fallback(user_text, grok_analysis, profile, mood, habits, memory, tasks_count=0):
-    if not QWEN_API_KEY:
-        return "Не могу сейчас ответить. Попробуй позже."
+    if not QWEN_API_KEY: return "Не могу сейчас ответить. Попробуй позже."
     user_name = profile.get("name") if profile else ""
     system_prompt = f"Ты — помощник {user_name}. Отвечай кратко, по делу. Настроение:{mood}. Тема:{grok_analysis.get('topic')}."
-    context = "\n".join([f"{m['role']}: {m['content']}" for m in memory[-10:]])
+    context = "\n".join([f"{m['role']}: {m['content']}" for m in memory[-6:]])
     messages = [{"role":"system","content":system_prompt},{"role":"user","content":f"{context}\n\n{user_text}"}]
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -234,8 +340,7 @@ async def call_qwen_fallback(user_text, grok_analysis, profile, mood, habits, me
                 json={"model":"qwen-max","messages":messages,"temperature":0.7}, timeout=15)
             r.raise_for_status()
             return r.json()["output"]["text"].strip()
-    except:
-        return "Не могу сейчас ответить. Попробуй позже."
+    except: return "Не могу сейчас ответить. Попробуй позже."
 
 # ======================
 #  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -254,15 +359,14 @@ async def update_emotion(uid, text):
     elif any(w in text for w in ["рад","счастлив","круто"]): mood = "радость"
     elif any(w in text for w in ["устал","выгор","нет сил"]): mood = "усталость"
     elif any(w in text for w in ["тревож","беспоко","нерв"]): mood = "тревога"
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO emotions(user_id,mood) VALUES ($1,$2)", uid, mood)
+    elif any(w in text for w in ["злюсь","бесит","раздраж"]): mood = "злость"
+    async with db_pool.acquire() as conn: await conn.execute("INSERT INTO emotions(user_id,mood) VALUES ($1,$2)", uid, mood)
 async def get_mood(uid):
     async with db_pool.acquire() as conn:
         row = await conn.fetchval("SELECT mood FROM emotions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1", uid)
         return row or "нейтральное"
 async def update_last_activity(uid):
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO last_activity(user_id,last_time) VALUES ($1,NOW()) ON CONFLICT(user_id) DO UPDATE SET last_time=NOW()", uid)
+    async with db_pool.acquire() as conn: await conn.execute("INSERT INTO last_activity(user_id,last_time) VALUES ($1,NOW()) ON CONFLICT(user_id) DO UPDATE SET last_time=NOW()", uid)
 async def get_profile(uid):
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT name,age,gender FROM profile WHERE user_id=$1", uid)
@@ -284,8 +388,7 @@ async def create_habit(uid, name):
         if not await conn.fetchval("SELECT id FROM habits WHERE user_id=$1 AND name=$2", uid, name):
             await conn.execute("INSERT INTO habits(user_id,name) VALUES ($1,$2)", uid, name)
 async def get_habits(uid):
-    async with db_pool.acquire() as conn:
-        return await conn.fetch("SELECT id,name,streak,last_done FROM habits WHERE user_id=$1", uid)
+    async with db_pool.acquire() as conn: return await conn.fetch("SELECT id,name,streak,last_done FROM habits WHERE user_id=$1", uid)
 def parse_time(text):
     text = text.lower(); now = datetime.now()
     if "вечером" in text: dt = now.replace(hour=19,minute=0); return dt if dt>now else dt+timedelta(days=1)
@@ -299,8 +402,7 @@ def parse_time(text):
 # ======================
 #  FSM
 # ======================
-class TaskFSM(StatesGroup):
-    title=State(); description=State(); priority=State(); due_date=State()
+class TaskFSM(StatesGroup): title=State(); description=State(); priority=State(); due_date=State()
 
 # ======================
 #  ХЕНДЛЕРЫ: КОМАНДЫ
@@ -321,8 +423,7 @@ async def cmd_profile(msg:Message):
     else: await msg.answer("Нет данных. Напиши: 'меня зовут...', 'мне 25'")
 @dp.message(Command("stats"))
 async def cmd_stats(msg:Message):
-    s = await get_task_stats(msg.from_user.id)
-    await msg.answer(f"📊 Задачи: {s['pending'] or 0} активных, {s['completed'] or 0} выполнено")
+    s = await get_task_stats(msg.from_user.id); await msg.answer(f"📊 Задачи: {s['pending'] or 0} активных, {s['completed'] or 0} выполнено")
 @dp.message(Command("weather"))
 async def cmd_weather(msg:Message):
     city = CITY_DEFAULT; parts = msg.text.split(maxsplit=1)
@@ -341,26 +442,17 @@ async def cmd_cinema(msg:Message):
 #  ХЕНДЛЕРЫ: ЗАДАЧИ
 # ======================
 @dp.message(Command("task"))
-async def cmd_task_start(msg:Message, state:FSMContext):
-    await state.set_state(TaskFSM.title); await msg.answer("📝 Название задачи:")
+async def cmd_task_start(msg:Message, state:FSMContext): await state.set_state(TaskFSM.title); await msg.answer("📝 Название задачи:")
 @dp.message(TaskFSM.title)
-async def task_title(msg:Message, state:FSMContext):
-    await state.update_data(title=msg.text); await state.set_state(TaskFSM.description); await msg.answer("📄 Описание (или /skip):")
+async def task_title(msg:Message, state:FSMContext): await state.update_data(title=msg.text); await state.set_state(TaskFSM.description); await msg.answer("📄 Описание (или /skip):")
 @dp.message(TaskFSM.description, F.text=="/skip")
-async def task_skip_desc(msg:Message, state:FSMContext):
-    await state.update_data(description=None); await state.set_state(TaskFSM.priority); await msg.answer("⚡ Приоритет: низкий / средний / высокий")
+async def task_skip_desc(msg:Message, state:FSMContext): await state.update_data(description=None); await state.set_state(TaskFSM.priority); await msg.answer("⚡ Приоритет: низкий / средний / высокий")
 @dp.message(TaskFSM.description)
-async def task_description(msg:Message, state:FSMContext):
-    await state.update_data(description=msg.text); await state.set_state(TaskFSM.priority); await msg.answer("⚡ Приоритет: низкий / средний / высокий")
+async def task_description(msg:Message, state:FSMContext): await state.update_data(description=msg.text); await state.set_state(TaskFSM.priority); await msg.answer("⚡ Приоритет: низкий / средний / высокий")
 @dp.message(TaskFSM.priority)
-async def task_priority(msg:Message, state:FSMContext):
-    p = msg.text.lower(); priority = "high" if "высок" in p else ("low" if "низк" in p else "medium")
-    await state.update_data(priority=priority); await state.set_state(TaskFSM.due_date); await msg.answer("📅 Срок (или /skip):")
+async def task_priority(msg:Message, state:FSMContext): p = msg.text.lower(); priority = "high" if "высок" in p else ("low" if "низк" in p else "medium"); await state.update_data(priority=priority); await state.set_state(TaskFSM.due_date); await msg.answer("📅 Срок (или /skip):")
 @dp.message(TaskFSM.due_date)
-async def task_finish(msg:Message, state:FSMContext):
-    data = await state.get_data(); due = parse_time(msg.text) if msg.text!="/skip" else None
-    tid = await create_task(msg.from_user.id, data["title"], data.get("description"), data["priority"], due)
-    await msg.answer(f"✅ Задача #{tid} создана", reply_markup=task_actions_keyboard(tid)); await state.clear()
+async def task_finish(msg:Message, state:FSMContext): data = await state.get_data(); due = parse_time(msg.text) if msg.text!="/skip" else None; tid = await create_task(msg.from_user.id, data["title"], data.get("description"), data["priority"], due); await msg.answer(f"✅ Задача #{tid} создана", reply_markup=task_actions_keyboard(tid)); await state.clear()
 @dp.message(Command("tasks"))
 async def cmd_tasks(msg:Message):
     tasks = await get_tasks(msg.from_user.id)
@@ -372,69 +464,36 @@ async def cmd_tasks(msg:Message):
 #  CALLBACKS
 # ======================
 @dp.callback_query(F.data=="tasks_list")
-async def cb_tasks(call:CallbackQuery):
-    tasks = await get_tasks(call.from_user.id)
-    text = "📋 Задачи:\n" + "\n".join([f"• {t['title']} | ID:{t['id']}" for t in tasks[:5]]) if tasks else "Нет задач"
-    await call.message.edit_text(text, reply_markup=main_menu_keyboard())
+async def cb_tasks(call:CallbackQuery): tasks = await get_tasks(call.from_user.id); text = "📋 Задачи:\n" + "\n".join([f"• {t['title']} | ID:{t['id']}" for t in tasks[:5]]) if tasks else "Нет задач"; await call.message.edit_text(text, reply_markup=main_menu_keyboard())
 @dp.callback_query(F.data=="task_create")
-async def cb_task_create(call:CallbackQuery):
-    await call.message.answer("📝 Название новой задачи:"); await call.answer("Используй /task для создания", show_alert=True)
+async def cb_task_create(call:CallbackQuery): await call.message.answer("📝 Название новой задачи:"); await call.answer("Используй /task для создания", show_alert=True)
 @dp.callback_query(F.data=="habits_list")
-async def cb_habits(call:CallbackQuery):
-    habits = await get_habits(call.from_user.id)
-    text = "🔁 Привычки:\n" + "\n".join([f"• {h['name']}: {h['streak']} дн." for h in habits]) if habits else "Нет привычек"
-    await call.message.edit_text(text, reply_markup=main_menu_keyboard())
+async def cb_habits(call:CallbackQuery): habits = await get_habits(call.from_user.id); text = "🔁 Привычки:\n" + "\n".join([f"• {h['name']}: {h['streak']} дн." for h in habits]) if habits else "Нет привычек"; await call.message.edit_text(text, reply_markup=main_menu_keyboard())
 @dp.callback_query(F.data=="reminders_list")
-async def cb_reminders(call:CallbackQuery):
-    await call.message.answer("⏰ Напоминания: напиши 'напомни [что] [когда]'\nПример: 'напомни выпить воды через 2 часа'"); await call.answer()
+async def cb_reminders(call:CallbackQuery): await call.message.answer("⏰ Напоминания: напиши 'напомни [что] [когда]'\nПример: 'напомни выпить воды через 2 часа'"); await call.answer()
 @dp.callback_query(F.data=="stats")
-async def cb_stats(call:CallbackQuery):
-    s = await get_task_stats(call.from_user.id)
-    await call.answer(f"📊 Задачи: {s['pending'] or 0} активных, {s['completed'] or 0} выполнено", show_alert=True)
+async def cb_stats(call:CallbackQuery): s = await get_task_stats(call.from_user.id); await call.answer(f"📊 Задачи: {s['pending'] or 0} активных, {s['completed'] or 0} выполнено", show_alert=True)
 @dp.callback_query(F.data=="profile_show")
-async def cb_profile(call:CallbackQuery):
-    p = await get_profile(call.from_user.id)
-    text = f"👤 {p['name']}" + (f", {p['age']} лет" if p and p['age'] else "") + (f", {p['gender']}" if p and p['gender'] else "") if p and p['name'] else "Нет данных"
-    await call.answer(text, show_alert=True)
+async def cb_profile(call:CallbackQuery): p = await get_profile(call.from_user.id); text = f"👤 {p['name']}" + (f", {p['age']} лет" if p and p['age'] else "") + (f", {p['gender']}" if p and p['gender'] else "") if p and p['name'] else "Нет данных"; await call.answer(text, show_alert=True)
 @dp.callback_query(F.data=="help_show")
-async def cb_help(call:CallbackQuery):
-    await call.message.answer("📋 **Справка:**\n• Задачи: /task, /tasks\n• Привычки: /habits\n• Погода: /weather [город]\n• Курс: /currency\n• Афиша: /cinema [город]\n\nИли просто пиши как другу 💬", parse_mode="Markdown"); await call.answer()
+async def cb_help(call:CallbackQuery): await call.message.answer("📋 **Справка:**\n• Задачи: /task, /tasks\n• Привычки: /habits\n• Погода: /weather [город]\n• Курс: /currency\n• Афиша: /cinema [город]\n\nИли просто пиши как другу 💬", parse_mode="Markdown"); await call.answer()
 @dp.callback_query(F.data=="ext_weather")
-async def cb_ext_weather(call:CallbackQuery):
-    profile = await get_profile(call.from_user.id); city = profile.get("name") if profile and profile.get("name") else CITY_DEFAULT
-    await call.message.answer(f"🌤 Погода в {city}:", reply_markup=external_link_keyboard(get_weather_link(city), f"Яндекс.Погода: {city}")); await call.answer()
+async def cb_ext_weather(call:CallbackQuery): profile = await get_profile(call.from_user.id); city = profile.get("name") if profile and profile.get("name") else CITY_DEFAULT; await call.message.answer(f"🌤 Погода в {city}:", reply_markup=external_link_keyboard(get_weather_link(city), f"Яндекс.Погода: {city}")); await call.answer()
 @dp.callback_query(F.data=="ext_currency")
-async def cb_ext_currency(call:CallbackQuery):
-    await call.message.answer("💱 Курс валют ЦБ РФ:", reply_markup=external_link_keyboard(get_currency_link(), "Открыть ЦБ")); await call.answer()
+async def cb_ext_currency(call:CallbackQuery): await call.message.answer("💱 Курс валют ЦБ РФ:", reply_markup=external_link_keyboard(get_currency_link(), "Открыть ЦБ")); await call.answer()
 @dp.callback_query(F.data=="ext_cinema")
-async def cb_ext_cinema(call:CallbackQuery):
-    profile = await get_profile(call.from_user.id); city = profile.get("name") if profile and profile.get("name") else CITY_DEFAULT
-    await call.message.answer(f"🎬 Афиша: {city}", reply_markup=external_link_keyboard(get_cinema_link(city), f"Афиша: {city}")); await call.answer()
+async def cb_ext_cinema(call:CallbackQuery): profile = await get_profile(call.from_user.id); city = profile.get("name") if profile and profile.get("name") else CITY_DEFAULT; await call.message.answer(f"🎬 Афиша: {city}", reply_markup=external_link_keyboard(get_cinema_link(city), f"Афиша: {city}")); await call.answer()
 @dp.callback_query(F.data=="ext_news")
-async def cb_ext_news(call:CallbackQuery):
-    await call.message.answer("📰 Новости:", reply_markup=external_link_keyboard(get_news_link(), "Яндекс.Новости")); await call.answer()
+async def cb_ext_news(call:CallbackQuery): await call.message.answer("📰 Новости:", reply_markup=external_link_keyboard(get_news_link(), "Яндекс.Новости")); await call.answer()
 @dp.callback_query(F.data.startswith("task_complete_"))
-async def cb_task_done(call:CallbackQuery):
-    tid = int(call.data.split("_")[-1]); await complete_task(call.from_user.id, tid); await call.answer("✅ Готово!", show_alert=True); await call.message.delete()
+async def cb_task_done(call:CallbackQuery): tid = int(call.data.split("_")[-1]); await complete_task(call.from_user.id, tid); await call.answer("✅ Готово!", show_alert=True); await call.message.delete()
 @dp.callback_query(F.data.startswith("task_delete_"))
-async def cb_task_del(call:CallbackQuery):
-    tid = int(call.data.split("_")[-1]); await delete_task(call.from_user.id, tid); await call.answer("🗑 Удалено", show_alert=True); await call.message.delete()
+async def cb_task_del(call:CallbackQuery): tid = int(call.data.split("_")[-1]); await delete_task(call.from_user.id, tid); await call.answer("🗑 Удалено", show_alert=True); await call.message.delete()
 
 # ======================
-#  УМНЫЙ ПАРСЕР КОМАНД (русские слова)
+#  УМНЫЙ ПАРСЕР КОМАНД
 # ======================
-RU_COMMANDS = {
-    "меню":"show_menu","главное меню":"show_menu","кнопки":"show_menu",
-    "задачи":"list_tasks","мои задачи":"list_tasks","список дел":"list_tasks",
-    "новая задача":"create_task","добавить задачу":"create_task",
-    "привычки":"list_habits","мои привычки":"list_habits",
-    "погода":"ext_weather","погода в":"ext_weather","как погода":"ext_weather",
-    "курс":"ext_currency","курс доллара":"ext_currency","валюта":"ext_currency",
-    "кино":"ext_cinema","афиша":"ext_cinema","что в кино":"ext_cinema",
-    "новости":"ext_news","что нового":"ext_news",
-    "профиль":"profile_show","обо мне":"profile_show",
-    "помощь":"help_show","что умеешь":"help_show",
-}
+RU_COMMANDS = {"меню":"show_menu","главное меню":"show_menu","кнопки":"show_menu","задачи":"list_tasks","мои задачи":"list_tasks","список дел":"list_tasks","новая задача":"create_task","добавить задачу":"create_task","привычки":"list_habits","мои привычки":"list_habits","погода":"ext_weather","погода в":"ext_weather","как погода":"ext_weather","курс":"ext_currency","курс доллара":"ext_currency","валюта":"ext_currency","кино":"ext_cinema","афиша":"ext_cinema","что в кино":"ext_cinema","новости":"ext_news","что нового":"ext_news","профиль":"profile_show","обо мне":"profile_show","помощь":"help_show","что умеешь":"help_show"}
 def parse_ru_command(text:str) -> str|None:
     text_lower = text.lower().strip()
     for keyword,cmd in RU_COMMANDS.items():
@@ -442,47 +501,52 @@ def parse_ru_command(text:str) -> str|None:
     return None
 
 # ======================
-#  ОСНОВНОЙ ЧАТ
+#  🔥 ОСНОВНОЙ ЧАТ (АДАПТИВНЫЙ)
 # ======================
 @dp.message()
 async def chat(msg:Message, state:FSMContext):
     if not msg.text or await state.get_state(): return
     uid = msg.from_user.id; text = msg.text.strip()
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO users(user_id,name) VALUES ($1,$2) ON CONFLICT DO NOTHING", uid, msg.from_user.first_name)
+    async with db_pool.acquire() as conn: await conn.execute("INSERT INTO users(user_id,name) VALUES ($1,$2) ON CONFLICT DO NOTHING", uid, msg.from_user.first_name)
     await update_last_activity(uid)
+    
     profile = await get_profile(uid)
     if not profile or not profile["name"]:
         name,age,gender = extract_profile(text)
         if name or age or gender:
             await save_profile(uid,name,age,gender); profile = {"name":name,"age":age,"gender":gender}
             await msg.answer(f"Запомнил: {name}" if name else "Запомнил тебя"); return
+    
+    # 🔥 Детектор режима и кризиса
+    mode = detect_mode(text)
+    crisis, crisis_type = is_crisis(text)
+    
+    # 🔥 Сброс контекста
+    if should_reset_context(text) or any(kw in text.lower() for kw in FRUSTRATION_KEYWORDS):
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM memory WHERE user_id=$1 AND id IN (SELECT id FROM memory WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5)", uid)
+        logging.info(f"🔄 Context reset for user {uid}")
+    
     memory = await get_memory(uid); mood = await get_mood(uid); habits = await get_habits(uid); tasks_count = (await get_task_stats(uid))["pending"] or 0
     await save_memory(uid,"user",text); await update_emotion(uid,text)
     
-    # 🔥 Парсер русских команд
+    # 🔥 Парсер команд
     cmd = parse_ru_command(text)
     if cmd:
         if cmd=="show_menu": await msg.answer("📋 Меню:", reply_markup=main_menu_keyboard()); return
         elif cmd=="list_tasks": await cmd_tasks(msg); return
         elif cmd=="create_task": await cmd_task_start(msg, state); return
-        elif cmd=="list_habits": await cb_habits_list(msg); return
-        elif cmd=="ext_weather":
-            city_match = re.search(r"в ([\w\s\-]+?)(?:\?|$)", text.lower())
-            city = city_match.group(1).strip() if city_match else CITY_DEFAULT
-            await msg.answer(f"🌤 Погода в {city}:", reply_markup=external_link_keyboard(get_weather_link(city), f"Яндекс.Погода: {city}")); return
+        elif cmd=="list_habits": await cb_habits(msg); return
+        elif cmd=="ext_weather": city_match = re.search(r"в ([\w\s\-]+?)(?:\?|$)", text.lower()); city = city_match.group(1).strip() if city_match else CITY_DEFAULT; await msg.answer(f"🌤 Погода в {city}:", reply_markup=external_link_keyboard(get_weather_link(city), f"Яндекс.Погода: {city}")); return
         elif cmd=="ext_currency": await cmd_currency(msg); return
-        elif cmd=="ext_cinema":
-            city_match = re.search(r"в ([\w\s\-]+?)(?:\?|$)", text.lower())
-            city = city_match.group(1).strip() if city_match else CITY_DEFAULT
-            await msg.answer(f"🎬 Афиша: {city}", reply_markup=external_link_keyboard(get_cinema_link(city), f"Афиша: {city}")); return
+        elif cmd=="ext_cinema": city_match = re.search(r"в ([\w\s\-]+?)(?:\?|$)", text.lower()); city = city_match.group(1).strip() if city_match else CITY_DEFAULT; await msg.answer(f"🎬 Афиша: {city}", reply_markup=external_link_keyboard(get_cinema_link(city), f"Афиша: {city}")); return
         elif cmd=="ext_news": await cb_ext_news(msg); return
         elif cmd=="profile_show": await cmd_profile(msg); return
         elif cmd=="help_show": await cmd_help(msg); return
     
     grok = await call_grok_analysis(text, memory, profile)
     
-    # Если ссылка — отправляем сразу
+    # Если ссылка
     if grok.get("external_link"):
         await msg.answer(f"{grok.get('external_link_label','Открыть')}:", reply_markup=external_link_keyboard(grok["external_link"], grok.get("external_link_label","Открыть"))); return
     
@@ -492,8 +556,8 @@ async def chat(msg:Message, state:FSMContext):
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO message_tags(user_id,message_id,tags,topic) VALUES ($1,$2,$3,$4)", uid, msg.message_id, grok.get("tags",[]), grok.get("topic"))
     
-    # 🔥 OpenAI — основной ответ
-    answer = await call_openai_primary(text, grok, profile, mood, habits, memory, tasks_count)
+    # 🔥 Адаптивный ответ с учётом режима
+    answer = await call_openai_primary(text, grok, profile, mood, habits, memory, tasks_count, mode=mode)
     await msg.answer(answer)
 
 # ======================
@@ -530,7 +594,7 @@ async def main():
     loop = asyncio.get_running_loop(); stop_event = asyncio.Event()
     for sig in (signal.SIGTERM, signal.SIGINT): loop.add_signal_handler(sig, stop_event.set)
     await init_db()
-    logging.info("✅ AssistEmpat v2.3 запущен (OpenAI-primary + smart commands)")
+    logging.info("✅ AssistEmpat v2.4 запущен (Adaptive personality + Practical help)")
     scheduler.start()
     scheduler.add_job(morning_ping, "cron", hour=9)
     scheduler.add_job(habit_check, "interval", hours=6)
