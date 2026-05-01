@@ -1,5 +1,5 @@
 # =========================================================
-#  ASSISTEMPAT BOT v2.7 (Layout Fix + Real Utilities)
+#  ASSISTEMPAT BOT v2.7.1 (Fixed Filters + Full Code)
 #  Архитектура: Grok (анализ) + OpenAI (универсальный ответ)
 #  Утилиты: Заметки / Календарь / Задачи / Привычки / Напоминания
 # =========================================================
@@ -86,13 +86,12 @@ def should_reset_context(text: str) -> bool:
     return any(kw in text.lower().strip() for kw in RESET_KEYWORDS)
 
 # ======================
-#  🔥 БАЗА ДАННЫХ (с миграциями для ВСЕХ таблиц)
+#  🔥 БАЗА ДАННЫХ (с миграциями)
 # ======================
 async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
     async with db_pool.acquire() as conn:
-        # 1. Создаём таблицы (если не существуют)
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS users(user_id BIGINT PRIMARY KEY, name TEXT, age INTEGER, gender TEXT, created_at TIMESTAMP DEFAULT NOW());
         CREATE TABLE IF NOT EXISTS memory(id SERIAL PRIMARY KEY, user_id BIGINT, role TEXT, content TEXT, created_at TIMESTAMP DEFAULT NOW());
@@ -107,21 +106,18 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS calendar_events(id SERIAL PRIMARY KEY, user_id BIGINT, title TEXT, description TEXT, event_date TIMESTAMP, reminder_before INTERVAL, created_at TIMESTAMP DEFAULT NOW());
         """)
         
-        # 2. Миграции для СТАРЫХ таблиц
         await conn.execute("ALTER TABLE reminders ADD COLUMN IF NOT EXISTS remind_at TIMESTAMP")
         await conn.execute("ALTER TABLE habits ADD COLUMN IF NOT EXISTS streak INTEGER DEFAULT 0")
         await conn.execute("ALTER TABLE habits ADD COLUMN IF NOT EXISTS last_done DATE")
         await conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'medium'")
         await conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS due_date TIMESTAMP")
         
-        # 3. Миграции для НОВЫХ таблиц (на случай, если созданы ранее без колонок)
         await conn.execute("ALTER TABLE notes ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()")
         await conn.execute("ALTER TABLE notes ADD COLUMN IF NOT EXISTS tags TEXT[]")
         await conn.execute("ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS reminder_before INTERVAL")
         await conn.execute("ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()")
         await conn.execute("ALTER TABLE response_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()")
         
-        # 4. Индексы
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_user ON memory(user_id, created_at DESC)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_habits_user ON habits(user_id)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders(remind_at)")
@@ -442,9 +438,9 @@ async def cmd_stats(msg:Message):
     await msg.answer(text, parse_mode="Markdown")
 
 # ======================
-#  ХЕНДЛЕРЫ: ЗАМЕТКИ
+#  ХЕНДЛЕРЫ: ЗАМЕТКИ (🔥 ИСПРАВЛЕНО: добавлен F.text)
 # ======================
-@dp.message(Command("note") | F.text.lower().regexp(r"(заметк|запиш|сохрани).*:"))
+@dp.message(F.text, Command("note") | F.text.regexp(r"(?i)(заметк|запиш|сохрани).*:"))
 async def cmd_note_start(msg:Message, state:FSMContext):
     await state.set_state(NoteFSM.content)
     await msg.answer("📝 Что записать в заметку? (или /skip для отмены)")
@@ -476,9 +472,9 @@ async def cmd_notes(msg:Message):
     await msg.answer(text, reply_markup=main_menu_keyboard())
 
 # ======================
-#  ХЕНДЛЕРЫ: КАЛЕНДАРЬ
+#  ХЕНДЛЕРЫ: КАЛЕНДАРЬ (🔥 ИСПРАВЛЕНО: добавлен F.text)
 # ======================
-@dp.message(Command("event") | F.text.lower().regexp(r"(событи|встреч|план|календар).*:"))
+@dp.message(F.text, Command("event") | F.text.regexp(r"(?i)(событи|встреч|план|календар).*:"))
 async def cmd_event_start(msg:Message, state:FSMContext):
     await state.set_state(CalendarFSM.title)
     await msg.answer("📅 Название события:")
@@ -672,7 +668,7 @@ async def inactivity_check():
 #  🔥 HEALTH CHECK
 # ======================
 async def health_handler(request):
-    return web.json_response({"status":"ok","bot":"AssistEmpat v2.7"}, headers={"Content-Type":"application/json"})
+    return web.json_response({"status":"ok","bot":"AssistEmpat v2.7.1"}, headers={"Content-Type":"application/json"})
 async def start_health_server():
     app = web.Application()
     app.router.add_get('/health', health_handler)
@@ -688,7 +684,7 @@ async def start_health_server():
 #  🔥 ЗАПУСК
 # ======================
 async def main():
-    logging.info(f"🚀 Starting AssistEmpat v2.7 (port={HEALTH_PORT})")
+    logging.info(f"🚀 Starting AssistEmpat v2.7.1 (port={HEALTH_PORT})")
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     def handle_signal():
@@ -723,7 +719,7 @@ async def main():
     if stop_event.is_set():
         await cleanup(health_runner)
         return
-    logging.info("✅ AssistEmpat v2.7 ready — STARTING POLLING")
+    logging.info("✅ AssistEmpat v2.7.1 ready — STARTING POLLING")
     polling_task = asyncio.create_task(dp.start_polling(bot))
     done, pending = await asyncio.wait([polling_task, asyncio.create_task(stop_event.wait())], return_when=asyncio.FIRST_COMPLETED)
     await cleanup(health_runner)
