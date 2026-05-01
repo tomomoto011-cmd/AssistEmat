@@ -1,7 +1,7 @@
 # =========================================================
-#  ASSISTEMPAT BOT v2.1 (FIXED)
+#  ASSISTEMPAT BOT v2.2 (UTILITIES + INLINE)
 #  Архитектура: Grok (анализ) + Qwen (эмпатия)
-#  БД: Neon PostgreSQL (с авто-миграциями)
+#  БД: Neon PostgreSQL + задачи + inline-кнопки
 # =========================================================
 
 import asyncio
@@ -32,7 +32,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 #  КОНФИГУРАЦИЯ
 # ======================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")  # Neon
+DATABASE_URL = os.getenv("DATABASE_URL")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -52,7 +52,6 @@ async def init_db():
     db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
     
     async with db_pool.acquire() as conn:
-        # 1. Создаем таблицы
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS users(
             user_id BIGINT PRIMARY KEY,
@@ -103,22 +102,93 @@ async def init_db():
             topic TEXT,
             created_at TIMESTAMP DEFAULT NOW()
         );
+        CREATE TABLE IF NOT EXISTS tasks(
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            title TEXT,
+            description TEXT,
+            status TEXT DEFAULT 'pending',
+            priority TEXT DEFAULT 'medium',
+            due_date TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
         """)
         
-        # 2. МИГРАЦИИ: добавляем колонки, если их нет
-        # Это чинит ошибку "column does not exist"
+        # Миграции
         await conn.execute("ALTER TABLE reminders ADD COLUMN IF NOT EXISTS remind_at TIMESTAMP")
         await conn.execute("ALTER TABLE habits ADD COLUMN IF NOT EXISTS streak INTEGER DEFAULT 0")
         await conn.execute("ALTER TABLE habits ADD COLUMN IF NOT EXISTS last_done DATE")
         await conn.execute("ALTER TABLE profile ADD COLUMN IF NOT EXISTS age INTEGER")
         await conn.execute("ALTER TABLE profile ADD COLUMN IF NOT EXISTS gender TEXT")
+        await conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS priority TEXT DEFAULT 'medium'")
+        await conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS due_date TIMESTAMP")
         
-        # 3. Индексы
+        # Индексы
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_user ON memory(user_id, created_at DESC)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_habits_user ON habits(user_id)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_reminders_time ON reminders(remind_at)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(user_id, status)")
         
     logging.info("✅ PostgreSQL initialized + migrations applied")
+
+# ======================
+#  ЗАДАЧИ (TASKS)
+# ======================
+async def create_task(uid, title, description=None, priority="medium", due_date=None):
+    async with db_pool.acquire() as conn:
+        result = await conn.fetchval(
+            "INSERT INTO tasks(user_id, title, description, priority, due_date) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+            uid, title, description, priority, due_date
+        )
+        return result
+
+async def get_tasks(uid, status="pending"):
+    async with db_pool.acquire() as conn:
+        return await conn.fetch(
+            "SELECT id, title, description, priority, due_date, created_at FROM tasks WHERE user_id=$1 AND status=$2 ORDER BY created_at DESC",
+            uid, status
+        )
+
+async def complete_task(uid, task_id):
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE tasks SET status='completed' WHERE id=$1 AND user_id=$2", task_id, uid)
+
+async def delete_task(uid, task_id):
+    async with db_pool.acquire() as conn:
+        await conn.execute("DELETE FROM tasks WHERE id=$1 AND user_id=$2", task_id, uid)
+
+async def get_task_stats(uid):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT 
+                COUNT(*) FILTER (WHERE status='pending') as pending,
+                COUNT(*) FILTER (WHERE status='completed') as completed
+            FROM tasks WHERE user_id=$1
+        """, uid)
+        return row
+
+# ======================
+#  INLINE КЛАВИАТУРЫ
+# ======================
+def main_menu_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Мои задачи", callback_data="tasks_list")],
+        [InlineKeyboardButton(text="🔁 Привычки", callback_data="habits_list")],
+        [InlineKeyboardButton(text="⏰ Напоминания", callback_data="reminders_list")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
+    ])
+
+def task_actions_keyboard(task_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Выполнить", callback_data=f"task_complete_{task_id}")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"task_delete_{task_id}")],
+    ])
+
+def yes_no_keyboard(callback_data_yes, callback_data_no):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Да", callback_data=callback_data_yes),
+         InlineKeyboardButton(text="Нет", callback_data=callback_data_no)],
+    ])
 
 # ======================
 #  GROK API (Секретарь)
@@ -141,13 +211,14 @@ async def call_grok_analysis(text: str, history: list = None) -> dict:
 
 Формат:
 {{
-    "topic": "работа|учеба|здоровье|отношения|эмоции|быт|другое",
+    "topic": "работа|учеба|здоровье|отношения|эмоции|быт|задача|другое",
     "tags": ["тег1", "тег2"],
-    "intent": "chat|question|task|complaint|request_help",
+    "intent": "chat|question|task|complaint|request_help|create_task",
     "emotional_tone": "neutral|positive|negative|stressed|tired",
-    "action_items": [],
+    "action_items": ["что нужно сделать"],
     "priority": "low|medium|high",
-    "refined_prompt": "уточненный запрос для ответа"
+    "refined_prompt": "уточненный запрос",
+    "is_task_creation": true/false (если пользователь хочет создать задачу)
 }}
 """
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -164,35 +235,48 @@ async def call_grok_analysis(text: str, history: list = None) -> dict:
             return data
     except Exception as e:
         logging.error(f"Grok error: {e}")
-        return {"topic": "general", "tags": [], "intent": "chat", "emotional_tone": "neutral", "action_items": [], "priority": "medium", "refined_prompt": text}
+        return {"topic": "general", "tags": [], "intent": "chat", "emotional_tone": "neutral", "action_items": [], "priority": "medium", "refined_prompt": text, "is_task_creation": False}
 
 # ======================
 #  QWEN API (Эмпат)
 # ======================
-async def call_qwen_empath(user_text, grok_analysis, profile, mood, habits, memory):
+async def call_qwen_empath(user_text, grok_analysis, profile, mood, habits, memory, tasks_count=0):
     if not QWEN_API_KEY:
-        return await call_openrouter_fallback(user_text, grok_analysis, profile, mood, habits, memory)
+        return await call_openrouter_fallback(user_text, grok_analysis, profile, mood, habits, memory, tasks_count)
     
-    user_name = profile[0] if profile and profile[0] else "друг"
+    user_name = profile[0] if profile and profile[0] else ""
     habit_list = ", ".join([h[0] for h in habits]) if habits else "не заданы"
     
     system_prompt = f"""
-Ты — помощник {user_name}. Стиль: спокойный, конкретный, без излишней эмоциональности.
-Контекст: настроение={mood}, тема={grok_analysis.get('topic')}, привычки={habit_list}.
+Ты — личный помощник {user_name if user_name else 'пользователя'}. 
 
-Правила:
-1. Без эмодзи или минимум (1 на сообщение)
-2. Без фраз "я рядом", "ты важен" — это фальшь
-3. Если проблема — предложи решение. Если вопрос — дай ответ
-4. Кратко (до 150 слов), по делу
-5. Не давай медицинских советов
+Контекст:
+- Настроение: {mood}
+- Тема: {grok_analysis.get('topic')}
+- Привычки: {habit_list}
+- Активных задач: {tasks_count}
 
-Примеры хороших ответов:
-- "Понял. Что именно беспокоит?"
-- "Вижу, что устал. Может, отложить на завтра?"
-- "По учебе: какой предмет сейчас сложный?"
+Стиль общения:
+1. Отвечай как живой человек — без фраз "я не жив", "я бот", "я ИИ"
+2. Коротко, по делу, без воды
+3. Если видишь, что человек хочет создать задачу — предложи сделать это через /task или кнопки
+4. Не используй шаблонные фразы вроде "я здесь чтобы помочь"
+5. Если вопрос конкретный — дай конкретный ответ
+6. Эмодзи используй редко (максимум 1 на сообщение)
 
-Отвечай по-русски.
+Примеры ХОРОШИХ ответов:
+- "Понял. Что именно нужно сделать?"
+- "Вижу, задач много. Давай разберёмся по порядку."
+- "По поводу {grok_analysis.get('topic')}: расскажи подробнее."
+- "Можешь создать задачу командой /task или через меню."
+
+Примеры ПЛОХИХ ответов (НИКОГДА не пиши так):
+- "Я не жив, но здесь чтобы помочь"
+- "Я способен отвечать на вопросы"
+- "Я здесь, чтобы помочь тебе"
+- "Не стесняйся, спрашивай!"
+
+Отвечай естественно, как в обычном чате.
 """
     context = "\n".join([f"{m['role']}: {m['content']}" for m in memory[-10:]])
     messages = [
@@ -211,11 +295,11 @@ async def call_qwen_empath(user_text, grok_analysis, profile, mood, habits, memo
             return r.json()["output"]["text"].strip()
     except Exception as e:
         logging.error(f"Qwen error: {e}")
-        return await call_openrouter_fallback(user_text, grok_analysis, profile, mood, habits, memory)
+        return await call_openrouter_fallback(user_text, grok_analysis, profile, mood, habits, memory, tasks_count)
 
-async def call_openrouter_fallback(user_text, grok_analysis, profile, mood, habits, memory):
-    user_name = profile[0] if profile and profile[0] else "друг"
-    system_prompt = f"Ты — помощник {user_name}. Отвечай спокойно, по делу. Настроение: {mood}. Тема: {grok_analysis.get('topic')}."
+async def call_openrouter_fallback(user_text, grok_analysis, profile, mood, habits, memory, tasks_count=0):
+    user_name = profile[0] if profile and profile[0] else ""
+    system_prompt = f"Ты — помощник {user_name}. Отвечай кратко, по делу, как живой человек. Избегай фраз 'я бот', 'я не жив'. Настроение: {mood}. Тем: {grok_analysis.get('topic')}."
     context = "\n".join([f"{m['role']}: {m['content']}" for m in memory[-10:]])
     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": f"{context}\n\n{user_text}"}]
     try:
@@ -233,7 +317,7 @@ async def call_openrouter_fallback(user_text, grok_analysis, profile, mood, habi
         return "Не могу сейчас ответить. Попробуй позже."
 
 # ======================
-#  ДБ ФУНКЦИИ
+#  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ======================
 async def save_memory(uid, role, content):
     async with db_pool.acquire() as conn:
@@ -299,6 +383,12 @@ async def get_habits(uid):
 # ======================
 #  FSM
 # ======================
+class TaskFSM(StatesGroup):
+    title = State()
+    description = State()
+    priority = State()
+    due_date = State()
+
 class ReminderFSM(StatesGroup):
     text = State()
     time = State()
@@ -321,81 +411,183 @@ def parse_time(text):
     return None
 
 # ======================
-#  ХЕНДЛЕРЫ
+#  ХЕНДЛЕРЫ: КОМАНДЫ
 # ======================
 @dp.message(Command("start"))
 async def cmd_start(msg: Message, state: FSMContext):
     await state.clear()
     profile = await get_profile(msg.from_user.id)
     name = profile["name"] if profile and profile["name"] else ""
-    greeting = f"Привет, {name}." if name else "Привет. Я твой помощник. Как тебя зовут?"
-    await msg.answer(greeting)
+    greeting = f"Привет, {name}." if name else "Привет. Как тебя зовут?"
+    await msg.answer(greeting, reply_markup=main_menu_keyboard())
 
 @dp.message(Command("help"))
 async def cmd_help(msg: Message):
     await msg.answer("""
-AssistEmpat — личный помощник
-• Привычки, напоминания, анализ настроения
-• Пиши как другу: "напомни выпить воды через 2 часа"
-• /start — начать, /profile — данные о себе
-""")
+📋 **Команды:**
+/task — создать задачу
+/tasks — мои задачи
+/habits — привычки
+/remind — напоминание
+/profile — данные о себе
+/stats — статистика
+
+Или используй кнопки внизу.
+""", parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
 @dp.message(Command("profile"))
 async def cmd_profile(msg: Message):
     profile = await get_profile(msg.from_user.id)
     if profile and profile["name"]:
-        info = f"Профиль:\nИмя: {profile['name']}\n"
+        info = f"👤 Профиль:\nИмя: {profile['name']}\n"
         if profile['age']: info += f"Возраст: {profile['age']}\n"
         if profile['gender']: info += f"Пол: {'мужской' if profile['gender'] == 'male' else 'женский'}\n"
         await msg.answer(info)
     else:
         await msg.answer("Нет данных. Напиши: 'меня зовут...', 'мне 25 лет'")
 
-@dp.message(F.text.contains("напомни"))
-async def reminder_start(msg: Message, state: FSMContext):
-    await state.set_state(ReminderFSM.text)
-    await state.update_data(text=msg.text, uid=msg.from_user.id)
-    await msg.answer("Когда? (например: 'через 30 минут', 'вечером')")
+@dp.message(Command("stats"))
+async def cmd_stats(msg: Message):
+    stats = await get_task_stats(msg.from_user.id)
+    habits = await get_habits(msg.from_user.id)
+    text = f"📊 **Статистика**\n"
+    text += f"Задачи: {stats['pending'] or 0} активных, {stats['completed'] or 0} выполнено\n"
+    text += f"Привычки: {len(habits)}\n"
+    await msg.answer(text, parse_mode="Markdown")
 
-@dp.message(ReminderFSM.text)
-async def reminder_time(msg: Message, state: FSMContext):
+# ======================
+#  ХЕНДЛЕРЫ: ЗАДАЧИ
+# ======================
+@dp.message(Command("task"))
+async def cmd_task_start(msg: Message, state: FSMContext):
+    await state.set_state(TaskFSM.title)
+    await msg.answer("📝 Название задачи:")
+
+@dp.message(TaskFSM.title)
+async def task_title(msg: Message, state: FSMContext):
+    await state.update_data(title=msg.text)
+    await state.set_state(TaskFSM.description)
+    await msg.answer("📄 Описание (или пропусти /skip):")
+
+@dp.message(TaskFSM.description, F.text == "/skip")
+async def task_skip_desc(msg: Message, state: FSMContext):
+    await state.update_data(description=None)
+    await state.set_state(TaskFSM.priority)
+    await msg.answer("⚡ Приоритет (low/medium/high):", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Низкий", callback_data="priority_low"),
+         InlineKeyboardButton(text="Средний", callback_data="priority_medium"),
+         InlineKeyboardButton(text="Высокий", callback_data="priority_high")],
+    ]))
+
+@dp.message(TaskFSM.description)
+async def task_description(msg: Message, state: FSMContext):
+    await state.update_data(description=msg.text)
+    await state.set_state(TaskFSM.priority)
+    await msg.answer("⚡ Приоритет (low/medium/high):")
+
+@dp.message(TaskFSM.priority)
+async def task_priority(msg: Message, state: FSMContext):
+    priority = msg.text.lower() if msg.text.lower() in ["low", "medium", "high"] else "medium"
+    await state.update_data(priority=priority)
+    await state.set_state(TaskFSM.due_date)
+    await msg.answer("📅 Срок (или /skip):")
+
+@dp.message(TaskFSM.due_date, F.text == "/skip")
+async def task_skip_date(msg: Message, state: FSMContext):
     data = await state.get_data()
-    dt = parse_time(msg.text)
-    if not dt:
-        await msg.answer("Не понял время.")
-        return
-    # Сохраняем в БД
-    async with db_pool.acquire() as conn:
-        await conn.execute("INSERT INTO reminders(user_id, text, remind_at) VALUES ($1, $2, $3)", data["uid"], data["text"], dt)
-    # Планируем задачу
-    scheduler.add_job(send_stored_reminder, "date", run_date=dt, args=[data["uid"], data["text"]], id=f"rem_{data['uid']}_{int(dt.timestamp())}")
-    await msg.answer(f"Напомню в {dt.strftime('%H:%M')}")
+    task_id = await create_task(msg.from_user.id, data["title"], data.get("description"), data["priority"])
+    await msg.answer(f"✅ Задача создана (ID: {task_id})", reply_markup=task_actions_keyboard(task_id))
     await state.clear()
 
-async def send_stored_reminder(uid, text):
-    try:
-        await bot.send_message(uid, f"⏰ {text}")
-        # Удаляем выполненное напоминание
-        async with db_pool.acquire() as conn:
-            await conn.execute("DELETE FROM reminders WHERE user_id=$1 AND text=$2", uid, text)
-    except Exception as e:
-        logging.error(f"Failed to send reminder: {e}")
+@dp.message(TaskFSM.due_date)
+async def task_due_date(msg: Message, state: FSMContext):
+    due_date = parse_time(msg.text)
+    data = await state.get_data()
+    task_id = await create_task(msg.from_user.id, data["title"], data.get("description"), data["priority"], due_date)
+    await msg.answer(f"✅ Задача создана (ID: {task_id})\nСрок: {due_date.strftime('%d.%m %H:%M') if due_date else 'не указан'}", 
+                    reply_markup=task_actions_keyboard(task_id))
+    await state.clear()
 
-@dp.callback_query(F.data.startswith("done_"))
-async def done_habit(call: CallbackQuery):
-    hid = int(call.data.split("_")[1])
-    now = datetime.now().date()
-    async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT streak, last_done FROM habits WHERE id=$1", hid)
-        if not row: return
-        streak, last = row["streak"], row["last_done"]
-        last_date = last if isinstance(last, date) else (datetime.fromisoformat(str(last)).date() if last else None)
-        if last_date == now:
-            await call.answer("Уже отмечено", show_alert=True)
-            return
-        streak = streak + 1 if last_date == now - timedelta(days=1) else 1
-        await conn.execute("UPDATE habits SET streak=$1, last_done=$2 WHERE id=$3", streak, now.isoformat(), hid)
-    await call.message.edit_text(f"Стрик: {streak} дней")
+@dp.message(Command("tasks"))
+async def cmd_tasks(msg: Message):
+    tasks = await get_tasks(msg.from_user.id, "pending")
+    if not tasks:
+        await msg.answer("📋 Нет активных задач. Отдыхай!")
+        return
+    
+    text = "📋 **Активные задачи:**\n\n"
+    for i, task in enumerate(tasks, 1):
+        text += f"{i}. **{task['title']}**\n"
+        if task['description']:
+            text += f"   {task['description']}\n"
+        text += f"   Приоритет: {task['priority']}"
+        if task['due_date']:
+            text += f" | Срок: {task['due_date'].strftime('%d.%m %H:%M')}"
+        text += f"\n   ID: {task['id']}\n\n"
+    
+    await msg.answer(text, parse_mode="Markdown")
+
+# ======================
+#  ХЕНДЛЕРЫ: CALLBACKS
+# ======================
+@dp.callback_query(F.data == "tasks_list")
+async def cb_tasks_list(call: CallbackQuery):
+    tasks = await get_tasks(call.from_user.id, "pending")
+    if not tasks:
+        await call.answer("Нет активных задач", show_alert=True)
+        return
+    
+    text = "📋 **Задачи:**\n"
+    for task in tasks[:5]:
+        text += f"• {task['title']}"
+        if task['due_date']:
+            text += f" (до {task['due_date'].strftime('%d.%m')})"
+        text += f"\n  ID: {task['id']}\n"
+    
+    await call.message.edit_text(text, parse_mode="Markdown", reply_markup=main_menu_keyboard())
+
+@dp.callback_query(F.data == "habits_list")
+async def cb_habits_list(call: CallbackQuery):
+    habits = await get_habits(call.from_user.id)
+    if not habits:
+        await call.answer("Нет привычек", show_alert=True)
+        return
+    
+    text = "🔁 **Привычки:**\n"
+    for h in habits:
+        text += f"• {h['name']}: {h['streak']} дней\n"
+    
+    await call.message.edit_text(text, reply_markup=main_menu_keyboard())
+
+@dp.callback_query(F.data == "reminders_list")
+async def cb_reminders_list(call: CallbackQuery):
+    await call.answer("Напоминания в разработке", show_alert=True)
+
+@dp.callback_query(F.data == "stats")
+async def cb_stats(call: CallbackQuery):
+    stats = await get_task_stats(call.from_user.id)
+    text = f"📊 Задачи: {stats['pending'] or 0} активных, {stats['completed'] or 0} выполнено"
+    await call.answer(text, show_alert=True)
+
+@dp.callback_query(F.data.startswith("task_complete_"))
+async def cb_task_complete(call: CallbackQuery):
+    task_id = int(call.data.split("_")[-1])
+    await complete_task(call.from_user.id, task_id)
+    await call.answer("✅ Выполнено!", show_alert=True)
+    await call.message.delete()
+
+@dp.callback_query(F.data.startswith("task_delete_"))
+async def cb_task_delete(call: CallbackQuery):
+    task_id = int(call.data.split("_")[-1])
+    await delete_task(call.from_user.id, task_id)
+    await call.answer("🗑 Удалено", show_alert=True)
+    await call.message.delete()
+
+@dp.callback_query(F.data.startswith("priority_"))
+async def cb_priority(call: CallbackQuery):
+    priority = call.data.split("_")[1]
+    await call.message.answer(f"Выбран приоритет: {priority}")
+    # Здесь нужна более сложная логика FSM — упрощено
 
 # ======================
 #  ОСНОВНОЙ ЧАТ
@@ -403,6 +595,8 @@ async def done_habit(call: CallbackQuery):
 @dp.message()
 async def chat(msg: Message, state: FSMContext):
     if not msg.text: return
+    if await state.get_state(): return  # Если пользователь в FSM — не обрабатываем
+    
     uid = msg.from_user.id
     text = msg.text.strip()
     
@@ -419,24 +613,26 @@ async def chat(msg: Message, state: FSMContext):
             await msg.answer(f"Запомнил. {f'Имя: {name}' if name else ''}")
             return
     
-    if "напомни" in text.lower() and not any(w in text for w in ["через", "в ", "завтра", "сегодня"]):
-        await msg.answer("Уточни время: 'напомни ... через 2 часа'")
-        return
-    
     memory = await get_memory(uid)
     mood = await get_mood(uid)
     habits = await get_habits(uid)
+    tasks_count = (await get_task_stats(uid))["pending"] or 0
     
     await save_memory(uid, "user", text)
     await update_emotion(uid, text)
     
     grok_data = await call_grok_analysis(text, memory)
     
+    # Если Grok определил создание задачи
+    if grok_data.get("is_task_creation") or "задач" in text.lower() or "сделай" in text.lower():
+        await msg.answer("Создать задачу? Используй /task или кнопку ниже.", reply_markup=main_menu_keyboard())
+        return
+    
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO message_tags(user_id, message_id, tags, topic) VALUES ($1, $2, $3, $4)",
                           uid, msg.message_id, grok_data.get("tags", []), grok_data.get("topic"))
     
-    answer = await call_qwen_empath(text, grok_data, profile, mood, habits, memory)
+    answer = await call_qwen_empath(text, grok_data, profile, mood, habits, memory, tasks_count)
     await msg.answer(answer)
 
 # ======================
@@ -446,7 +642,7 @@ async def morning_ping():
     async with db_pool.acquire() as conn:
         users = await conn.fetch("SELECT user_id FROM users")
     for u in users:
-        try: await bot.send_message(u["user_id"], "Доброе утро. План на сегодня?")
+        try: await bot.send_message(u["user_id"], "Доброе утро. Какой план?")
         except: pass
 
 async def habit_check():
@@ -457,8 +653,22 @@ async def habit_check():
         if h["last_done"]:
             last = h["last_done"] if isinstance(h["last_done"], date) else datetime.fromisoformat(str(h["last_done"])).date()
             if last < now - timedelta(days=1):
-                try: await bot.send_message(h["user_id"], f"Привычка '{h['name']}' пропущена. Продолжай.")
+                try: await bot.send_message(h["user_id"], f"Привычка '{h['name']}' пропущена.")
                 except: pass
+
+async def task_reminder_check():
+    """Проверяет задачи с дедлайном"""
+    async with db_pool.acquire() as conn:
+        tasks = await conn.fetch("""
+            SELECT user_id, title, due_date FROM tasks 
+            WHERE status='pending' AND due_date IS NOT NULL 
+            AND due_date <= NOW() + INTERVAL '1 hour'
+            AND due_date > NOW() - INTERVAL '1 hour'
+        """)
+    for task in tasks:
+        try:
+            await bot.send_message(task["user_id"], f"⏰ Скоро дедлайн: {task['title']}")
+        except: pass
 
 async def inactivity_check():
     async with db_pool.acquire() as conn:
@@ -477,11 +687,12 @@ async def main():
         loop.add_signal_handler(sig, stop_event.set)
     
     await init_db()
-    logging.info("✅ AssistEmpat v2.1 запущен (Neon + миграции)")
+    logging.info("✅ AssistEmpat v2.2 запущен (Tasks + Inline)")
     
     scheduler.start()
     scheduler.add_job(morning_ping, "cron", hour=9)
     scheduler.add_job(habit_check, "interval", hours=6)
+    scheduler.add_job(task_reminder_check, "interval", minutes=30)
     scheduler.add_job(inactivity_check, "interval", hours=24)
     
     await bot.delete_webhook(drop_pending_updates=True)
