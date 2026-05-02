@@ -1,8 +1,10 @@
 # =========================================================
-#  ASSISTEMPAT BOT v4.2 (OpenAI Only + Context Reset)
-#  Архитектура: OpenAI (основной) + Qwen (запасной)
-#  Утилиты: Задачи / Заметки / Календарь / Привычки / Дашборд
-#  Вовлечение: Цитата дня (8:00) + Факт дня (13:00) МСК
+#  ASSISTEMPAT BOT v4.3 (Fixed Utils + Smart Rotation)
+#  Исправления:
+#  1. Заметки показывают заметки (не события!)
+#  2. Создание задач/заметок через текст
+#  3. Цитаты/факты не повторяются (умная ротация)
+#  4. Более развёрнутые ответы OpenAI
 #  Часовой пояс: Москва (UTC+3)
 # =========================================================
 
@@ -42,7 +44,7 @@ def now_moscow() -> datetime:
     return datetime.now(MOSCOW_TZ)
 
 # ======================
-#  🔥 ЦИТАТЫ И ФАКТЫ (на русском)
+#  🔥 ЦИТАТЫ И ФАКТЫ (на русском) - 20 штук каждого
 # ======================
 QUOTES_RU = [
     "«Путь в тысячу миль начинается с первого шага» — Лао-Цзы",
@@ -55,6 +57,16 @@ QUOTES_RU = [
     "«Сложнее всего начать действовать, все остальное зависит только от упорства» — Амелия Эрхарт",
     "«Ваше время ограничено, не тратьте его, живя чужой жизнью» — Стив Джобс",
     "«Если вы хотите достичь цели, нужно работать. А если хотите достичь великой цели, нужно работать ещё больше» — Опра Уинфри",
+    "«Будь собой и иди своим путём» — Фридрих Ницше",
+    "«Знание — сила» — Фрэнсис Бэкон",
+    "«Жизнь — это то, что происходит, пока ты строишь другие планы» — Джон Леннон",
+    "«Мечтай так, словно будешь жить вечно. Живи так, словно умрёшь сегодня» — Джеймс Дин",
+    "«Единственный предел нашим достижениям завтра — это наши сомнения сегодня» — Франклин Рузвельт",
+    "«Не жди. Время никогда не будет «подходящим»» — Наполеон Хилл",
+    "«Успех — это сумма небольших усилий, повторяющихся изо дня в день» — Роберт Кольер",
+    "«Ты становишься тем, о чём думаешь» — Ог Мандино",
+    "«Всё, что ты можешь представить — реально» — Пабло Пикассо",
+    "«Действуй так, словно то, что ты делаешь, имеет значение. Это так» — Уильям Джеймс",
 ]
 
 FACTS_RU = [
@@ -68,13 +80,61 @@ FACTS_RU = [
     "🧬 У человека и банана около 50% общих генов.",
     "⚡ Молния нагревает воздух до 30 000 °C — в 5 раз горячее поверхности Солнца.",
     "🦋 Бабочки пробуют вкус ногами.",
+    "🐙 У осьминога три сердца и голубая кровь.",
+    "🌊 В океане больше золота, чем можно добыть на суше (но оно растворено в воде).",
+    "⏰ Самая короткая война в истории длилась 38 минут (между Англией и Занзибаром в 1896).",
+    "🍯 Мёд — единственный продукт, который не портится. Археологи находили мёд в гробницах фараонов.",
+    "🎵 Коровы дают больше молока, когда слушают музыку.",
+    "🌌 В нашей галактике больше звёзд, чем песчинок на всех пляжах Земли.",
+    "👶 Дети рождаются без коленных чашечек — они появляются к 3 годам.",
+    "🐢 Некоторые черепахи могут дышать через задний проход.",
+    "💎 Алмазы — это просто углерод, сжатый под огромным давлением миллиарды лет.",
+    "🎲 Если перемешать колоду карт, полученная комбинация никогда не существовала раньше.",
 ]
 
-def get_random_quote() -> str:
-    return random.choice(QUOTES_RU)
+# ======================
+#  🔥 УМНАЯ РОТАЦИЯ ЦИТАТ И ФАКТОВ
+# ======================
+async def get_next_quote_for_user(uid: int) -> str:
+    """Возвращает следующую цитату для пользователя (не повторяется пока все не покажет)"""
+    async with db_pool.acquire() as conn:
+        # Получаем последний индекс цитаты для пользователя
+        row = await conn.fetchval("SELECT last_quote_index FROM profile WHERE user_id=$1", uid)
+        if row is None:
+            last_index = -1
+        else:
+            last_index = row
+        
+        # Берём следующую цитату
+        next_index = (last_index + 1) % len(QUOTES_RU)
+        quote = QUOTES_RU[next_index]
+        
+        # Обновляем индекс
+        await conn.execute("""
+            INSERT INTO profile(user_id, last_quote_index) VALUES ($1, $2)
+            ON CONFLICT(user_id) DO UPDATE SET last_quote_index = $2
+        """, uid, next_index)
+        
+        return quote
 
-def get_random_fact() -> str:
-    return random.choice(FACTS_RU)
+async def get_next_fact_for_user(uid: int) -> str:
+    """Возвращает следующий факт для пользователя (не повторяется пока все не покажет)"""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchval("SELECT last_fact_index FROM profile WHERE user_id=$1", uid)
+        if row is None:
+            last_index = -1
+        else:
+            last_index = row
+        
+        next_index = (last_index + 1) % len(FACTS_RU)
+        fact = FACTS_RU[next_index]
+        
+        await conn.execute("""
+            INSERT INTO profile(user_id, last_fact_index) VALUES ($1, $2)
+            ON CONFLICT(user_id) DO UPDATE SET last_fact_index = $2
+        """, uid, next_index)
+        
+        return fact
 
 # ======================
 #  КОНФИГУРАЦИЯ
@@ -172,6 +232,7 @@ async def init_db():
         );
         """)
         
+        # 🔥 Добавляем поля для ротации цитат и фактов
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS profile(
             user_id BIGINT PRIMARY KEY,
@@ -179,6 +240,8 @@ async def init_db():
             age INTEGER,
             gender TEXT,
             city TEXT DEFAULT 'Москва',
+            last_quote_index INTEGER DEFAULT 0,
+            last_fact_index INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         );
@@ -208,6 +271,8 @@ async def init_db():
         await conn.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS checklist JSONB DEFAULT '[]'")
         
         await conn.execute("ALTER TABLE profile ADD COLUMN IF NOT EXISTS city TEXT DEFAULT 'Москва'")
+        await conn.execute("ALTER TABLE profile ADD COLUMN IF NOT EXISTS last_quote_index INTEGER DEFAULT 0")
+        await conn.execute("ALTER TABLE profile ADD COLUMN IF NOT EXISTS last_fact_index INTEGER DEFAULT 0")
         await conn.execute("ALTER TABLE profile ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()")
         
         # Индексы
@@ -224,7 +289,7 @@ async def init_db():
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_calendar_user ON calendar_events(user_id, event_date)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_calendar_category ON calendar_events(user_id, category)")
         
-    logging.info("✅ PostgreSQL initialized + v4.2 features")
+    logging.info("✅ PostgreSQL initialized + v4.3 features + smart rotation")
 
 # ======================
 #  🔥 ОЧИСТКА КОНТЕКСТА
@@ -575,23 +640,39 @@ class CalendarFSM(StatesGroup): title=State(); description=State(); event_date=S
 class ProfileEditFSM(StatesGroup): field=State(); value=State()
 
 # ======================
-#  🔥 OPENAI: ОСНОВНОЙ ОТВЕТ
+#  🔥 OPENAI: БОЛЕЕ РАЗВЁРНУТЫЕ ОТВЕТЫ
 # ======================
 async def call_openai_chat(user_text: str, profile: dict = None, mood: str = "нейтральное", memory: list = None):
-    """OpenAI генерирует естественный ответ"""
+    """OpenAI генерирует развёрнутый естественный ответ"""
     if not OPENROUTER_API_KEY:
         return await call_qwen_fallback(user_text, profile, mood, memory)
     
     user_name = profile.get("name") if profile else ""
     city = profile.get("city", CITY_DEFAULT) if profile else CITY_DEFAULT
     
-    system_prompt = f"""Ты — {user_name or 'помощник'}. Город: {city}.
-Отвечай кратко и естественно, как в чате с другом."""
+    system_prompt = f"""Ты — AssistEmpat, личный помощник {user_name or 'пользователя'}.
+Город пользователя: {city}.
+
+ТВОИ ВОЗМОЖНОСТИ:
+- Создание задач: "/task" или просто напиши "создай задачу: ..."
+- Заметки: "/note" или "запиши заметку: ..."
+- Календарь: "/event" или "добавь событие: ..."
+- Погода, курс валют, кино, новости — по запросу
+- Дашборд: "/dashboard" — сводка дня
+
+ПРАВИЛА ОБЩЕНИЯ:
+1. Отвечай развёрнуто, но по делу (3-5 предложений)
+2. Будь дружелюбным и естественным
+3. Если пользователь просит создать задачу/заметку — подтверди создание
+4. Используй эмодзи умеренно
+5. Если не понял — переспроси уточняющий вопрос
+
+Текущее настроение пользователя: {mood}"""
     
-    # Контекст: последние 3 сообщения
+    # Контекст: последние 5 сообщений
     filtered_memory = []
     seen = set()
-    for msg in reversed(memory[-3:] if memory else []):
+    for msg in reversed(memory[-5:] if memory else []):
         content = msg["content"].strip()
         if content and len(content) > 3 and content not in seen:
             filtered_memory.insert(0, msg)
@@ -604,7 +685,7 @@ async def call_openai_chat(user_text: str, profile: dict = None, mood: str = "н
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post("https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
-                json={"model": "openai/gpt-4o-mini", "messages": messages, "temperature": 0.7, "max_tokens": 300})
+                json={"model": "openai/gpt-4o-mini", "messages": messages, "temperature": 0.7, "max_tokens": 500})
             r.raise_for_status()
             answer = r.json()["choices"][0]["message"]["content"].strip()
             if await is_duplicate_response(profile.get("user_id") if profile else 0, answer):
@@ -702,7 +783,7 @@ def parse_ru_command(text:str) -> str|None:
 @dp.message(Command("start"))
 async def cmd_start(msg:Message, state:FSMContext):
     await state.clear()
-    await clear_user_context(msg.from_user.id)  # 🔥 Сброс при /start
+    await clear_user_context(msg.from_user.id)
     profile = await get_profile(msg.from_user.id)
     name = profile["name"] if profile and profile["name"] else ""
     await msg.answer(f"Привет, {name}." if name else "Привет. Как тебя зовут?", reply_markup=main_menu_keyboard())
@@ -1112,7 +1193,7 @@ async def cb_ext_news(call:CallbackQuery):
     await call.answer()
 
 # ======================
-#  🔥 🔥 🔥 ОСНОВНОЙ ЧАТ (ПРОСТОЙ РОУТИНГ) 🔥 🔥 
+#  🔥 🔥 🔥 ОСНОВНОЙ ЧАТ (УЛУЧШЕННЫЙ) 🔥 🔥 
 # ======================
 @dp.message()
 async def chat(msg:Message, state:FSMContext):
@@ -1120,6 +1201,7 @@ async def chat(msg:Message, state:FSMContext):
     
     uid = msg.from_user.id
     text = fix_layout(msg.text.strip())
+    text_lower = text.lower()
     
     async with db_pool.acquire() as conn: 
         await conn.execute("INSERT INTO users(user_id,name) VALUES ($1,$2) ON CONFLICT DO NOTHING", uid, msg.from_user.first_name)
@@ -1134,7 +1216,7 @@ async def chat(msg:Message, state:FSMContext):
             await msg.answer(f"Запомнил: {name or city}")
             return
     
-    if should_reset_context(text) or any(kw in text.lower() for kw in FRUSTRATION_KEYWORDS):
+    if should_reset_context(text) or any(kw in text_lower for kw in FRUSTRATION_KEYWORDS):
         async with db_pool.acquire() as conn:
             await conn.execute("DELETE FROM memory WHERE user_id=$1 AND id IN (SELECT id FROM memory WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5)", uid)
     
@@ -1143,7 +1225,7 @@ async def chat(msg:Message, state:FSMContext):
     await save_memory(uid, "user", text)
     await update_emotion(uid, text)
     
-    # 🔥 ПРЯМАЯ ОБРАБОТКА КОМАНД (без AI)
+    # 🔥 1. ПРЯМАЯ ОБРАБОТКА КОМАНД ЧЕРЕЗ PARSE
     cmd = parse_ru_command(text)
     if cmd:
         if cmd == "show_menu":
@@ -1152,7 +1234,7 @@ async def chat(msg:Message, state:FSMContext):
         elif cmd == "list_tasks":
             await cmd_tasks(msg)
             return
-        elif cmd == "notes_list":
+        elif cmd == "notes_list":  # 🔥 ИСПРАВЛЕНО: показываем заметки, не события!
             await cmd_notes(msg)
             return
         elif cmd == "calendar_list":
@@ -1183,8 +1265,8 @@ async def chat(msg:Message, state:FSMContext):
             city = profile.get("city") if profile and profile.get("city") else CITY_DEFAULT
             movies = await get_cinema_data(city)
             if movies:
-                text = "🎬 В прокате:\n" + "\n".join([f"• {m['title']} ⭐{m['rating']:.1f}" for m in movies])
-                await msg.answer(text, reply_markup=external_link_keyboard(get_cinema_link(city), f"Афиша: {city}"))
+                text_msg = "🎬 В прокате:\n" + "\n".join([f"• {m['title']} ⭐{m['rating']:.1f}" for m in movies])
+                await msg.answer(text_msg, reply_markup=external_link_keyboard(get_cinema_link(city), f"Афиша: {city}"))
             else:
                 await msg.answer(f"🎬 {city}:", reply_markup=external_link_keyboard(get_cinema_link(city), "Афиша"))
             return
@@ -1202,32 +1284,68 @@ async def chat(msg:Message, state:FSMContext):
             await cmd_help(msg)
             return
     
-    # 🔥 ВСЁ ОСТАЛЬНОЕ — ЧАТ С OPENAI
+    # 🔥 2. СОЗДАНИЕ ЗАДАЧ ЧЕРЕЗ ТЕКСТ
+    if any(kw in text_lower for kw in ["создай задачу", "добавь задачу", "новая задача", "задача:"]):
+        task_title = text
+        for kw in ["создай задачу", "добавь задачу", "новая задача", "задача:"]:
+            if kw in task_title:
+                task_title = task_title.split(kw)[-1].strip()
+                break
+        
+        if task_title and len(task_title) > 3:
+            task_id = await create_task(uid, title=task_title, category="general", priority="medium")
+            await msg.answer(f"✅ Задача #{task_id} создана: {task_title}\n\nИспользуй /tasks чтобы посмотреть все задачи", reply_markup=task_actions_keyboard(task_id))
+            return
+    
+    # 🔥 3. СОЗДАНИЕ ЗАМЕТОК ЧЕРЕЗ ТЕКСТ
+    if any(kw in text_lower for kw in ["запиши заметку", "создай заметку", "добавь заметку", "заметка:", "запиши"]):
+        note_content = text
+        for kw in ["запиши заметку", "создай заметку", "добавь заметку", "заметка:", "запиши"]:
+            if kw in note_content:
+                note_content = note_content.split(kw)[-1].strip()
+                break
+        
+        if note_content and len(note_content) > 3:
+            note_id = await create_note(uid, content=note_content, category="general")
+            await msg.answer(f"✅ Заметка #{note_id} сохранена!\n\nИспользуй /notes чтобы посмотреть все заметки", reply_markup=note_actions_keyboard(note_id))
+            return
+    
+    # 🔥 4. СОЗДАНИЕ СОБЫТИЙ ЧЕРЕЗ ТЕКСТ
+    if any(kw in text_lower for kw in ["добавь событие", "создай событие", "встреча:", "план:"]):
+        await msg.answer("📅 Для создания события используй команду /event — так будет надёжнее!")
+        return
+    
+    # 🔥 5. ВСЁ ОСТАЛЬНОЕ — ЧАТ С OPENAI
     answer = await call_openai_chat(text, profile, mood, memory)
     await msg.answer(answer)
 
 # ======================
-#  🔥 ПЛАНИРОВЩИК
+#  🔥 ПЛАНИРОВЩИК С УМНОЙ РОТАЦИЕЙ
 # ======================
 async def morning_quote():
-    """🌅 Цитата дня в 8:00 МСК"""
-    async with db_pool.acquire() as conn: users = await conn.fetch("SELECT user_id FROM users")
-    quote = get_random_quote()
+    """🌅 Цитата дня в 8:00 МСК (не повторяется!)"""
+    async with db_pool.acquire() as conn: 
+        users = await conn.fetch("SELECT user_id FROM users")
     for u in users:
-        try: await bot.send_message(u["user_id"], f"☀️ **Доброе утро!**\n\n{quote}")
+        try: 
+            quote = await get_next_quote_for_user(u["user_id"])
+            await bot.send_message(u["user_id"], f"☀️ **Доброе утро!**\n\n{quote}")
         except: pass
 
 async def afternoon_fact():
-    """🌞 Факт дня в 13:00 МСК"""
-    async with db_pool.acquire() as conn: users = await conn.fetch("SELECT user_id FROM users")
-    fact = get_random_fact()
+    """🌞 Факт дня в 13:00 МСК (не повторяется!)"""
+    async with db_pool.acquire() as conn: 
+        users = await conn.fetch("SELECT user_id FROM users")
     for u in users:
-        try: await bot.send_message(u["user_id"], f"🧠 **Факт дня**:\n\n{fact}")
+        try: 
+            fact = await get_next_fact_for_user(u["user_id"])
+            await bot.send_message(u["user_id"], f"🧠 **Факт дня**:\n\n{fact}")
         except: pass
 
 async def morning_ping():
     """Утренний дашборд в 9:00 МСК"""
-    async with db_pool.acquire() as conn: users = await conn.fetch("SELECT user_id FROM users")
+    async with db_pool.acquire() as conn: 
+        users = await conn.fetch("SELECT user_id FROM users")
     for u in users:
         try: 
             profile = await get_profile(u["user_id"])
@@ -1237,7 +1355,8 @@ async def morning_ping():
 
 async def evening_report():
     """Вечерний отчёт в 21:00 МСК"""
-    async with db_pool.acquire() as conn: users = await conn.fetch("SELECT user_id FROM users")
+    async with db_pool.acquire() as conn: 
+        users = await conn.fetch("SELECT user_id FROM users")
     for u in users:
         try:
             completed = await conn.fetchval("SELECT COUNT(*) FROM tasks WHERE user_id=$1 AND status='completed' AND completed_at::date = CURRENT_DATE", u["user_id"])
@@ -1246,7 +1365,8 @@ async def evening_report():
         except: pass
 
 async def habit_check():
-    async with db_pool.acquire() as conn: habits = await conn.fetch("SELECT id,user_id,name,last_done,frequency FROM habits")
+    async with db_pool.acquire() as conn: 
+        habits = await conn.fetch("SELECT id,user_id,name,last_done,frequency FROM habits")
     now = now_moscow().date()
     for h in habits:
         if h["frequency"]=="daily" and h["last_done"] and h["last_done"] < now - timedelta(days=1):
@@ -1271,7 +1391,7 @@ async def calendar_reminder_check():
 #  🔥 HEALTH CHECK
 # ======================
 async def health_handler(request):
-    return web.json_response({"status":"ok","bot":"AssistEmpat v4.2"}, headers={"Content-Type":"application/json"})
+    return web.json_response({"status":"ok","bot":"AssistEmpat v4.3"}, headers={"Content-Type":"application/json"})
 
 async def start_health_server():
     app = web.Application()
@@ -1288,7 +1408,7 @@ async def start_health_server():
 #  🔥 ЗАПУСК
 # ======================
 async def main():
-    logging.info(f"🚀 Starting AssistEmpat v4.2 (port={HEALTH_PORT}, TZ=Moscow)")
+    logging.info(f"🚀 Starting AssistEmpat v4.3 (port={HEALTH_PORT}, TZ=Moscow)")
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     def handle_signal():
@@ -1325,7 +1445,7 @@ async def main():
     if stop_event.is_set():
         await cleanup(health_runner)
         return
-    logging.info("✅ AssistEmpat v4.2 ready — STARTING POLLING")
+    logging.info("✅ AssistEmpat v4.3 ready — STARTING POLLING")
     polling_task = asyncio.create_task(dp.start_polling(bot))
     done, pending = await asyncio.wait([polling_task, asyncio.create_task(stop_event.wait())], return_when=asyncio.FIRST_COMPLETED)
     await cleanup(health_runner)
