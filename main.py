@@ -355,14 +355,18 @@ async def get_profile(uid):
 
 async def save_profile(uid, name=None, age=None, gender=None, city=None):
     async with db_pool.acquire() as conn:
-        updates, params, idx = [], [uid], 2
-        for field, value in [("name", name), ("age", age), ("gender", gender), ("city", city)]:
-            if value is not None:
-                updates.append(f"{field}=${idx}"); params.append(value); idx += 1
-        if updates:
-            updates.append("updated_at=NOW()")
-            query = f"INSERT INTO profile(user_id,name,age,gender,city) VALUES ($1,$2,$3,$4,$5) ON CONFLICT(user_id) DO UPDATE SET {', '.join(updates)}"
-            await conn.execute(query, *params)
+        # 🔥 Всегда передаём все 5 параметров (даже если None)
+        query = """
+            INSERT INTO profile(user_id, name, age, gender, city) 
+            VALUES ($1, $2, $3, $4, $5) 
+            ON CONFLICT(user_id) DO UPDATE SET 
+                name = COALESCE($2, profile.name),
+                age = COALESCE($3, profile.age),
+                gender = COALESCE($4, profile.gender),
+                city = COALESCE($5, profile.city),
+                updated_at = NOW()
+        """
+        await conn.execute(query, uid, name, age, gender, city)
 
 # ======================
 #  INLINE КЛАВИАТУРЫ
@@ -647,6 +651,16 @@ async def cmd_stats(msg:Message):
     text += f"Заметки: {len(await get_notes(msg.from_user.id, limit=100))}\n"
     text += f"События: {len(await get_calendar_events(msg.from_user.id, limit=100))}"
     await msg.answer(text, parse_mode="Markdown")
+@dp.message(Command("news"))
+async def cmd_news(msg:Message):
+    news = await get_news_data()
+    if news:
+        text = "📰 **Главные новости**:\n\n"
+        text += "\n".join([f"• {n['title']}" for n in news])
+        text += f"\n\n🔗 Все новости: {get_news_link()}"
+        await msg.answer(text, reply_markup=external_link_keyboard(get_news_link(), "Яндекс.Новости"))
+    else:
+        await msg.answer("📰 Новости:", reply_markup=external_link_keyboard(get_news_link(), "Яндекс.Новости"))
 
 # ======================
 #  🔥 ПРОФИЛЬ: РЕДАКТИРОВАНИЕ
