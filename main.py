@@ -1,11 +1,11 @@
 # =========================================================
-#  ASSISTEMPAT BOT v4.7 (Linked Notes + Smart Habits + Dashboard 2.0)
+#  ASSISTEMPAT BOT v4.8 (Connected Intelligence + Multi-Profile + Adaptive Responses)
 #  Новое:
-#  1. 🌳 Дерево заметок: parent_id, рекурсивный вывод, навигация
-#  2. 🔗 Связь задач и заметок: linked_note_ids, отображение в дашборде
-#  3. 📈 Гибкие привычки: schedule_json, habit_logs, текстовые графики
-#  4. 🧠 Умный дашборд: active_tasks + linked_notes + прогресс привычек
-#  5. 🔔 Умные напоминания: анализ паттернов активности
+#  1. 🧠 Долгосрочная память: user_insights, паттерны, предпочтения
+#  2. 👥 Мульти-профили: семейные группы, роли, общие задачи
+#  3. 🎭 Возрастно-гендерная адаптация: тон, язык, сложность ответов
+#  4. 🌉 Контекстный бридж: плавные переходы между режимами
+#  5. 📊 Дашборд 3.0: личный/семейный вид, инсайты
 #  Часовой пояс: Москва (UTC+3)
 # =========================================================
 
@@ -136,7 +136,7 @@ db_pool = None
 LAYOUT_MAP = {'q':'й','w':'ц','e':'у','r':'к','t':'е','y':'н','u':'г','i':'ш','o':'щ','p':'з','[':'х',']':'ъ','a':'ф','s':'ы','d':'в','f':'а','g':'п','h':'р','j':'о','k':'л','l':'д',';':'ж',"'":'э','z':'я','x':'ч','c':'с','v':'м','b':'и','n':'т','m':'ь',',':'б','.':'ю','/':'.'}
 def fix_layout(text: str) -> str:
     if not text or len(text) < 4: return text
-    safe = ['меню', 'инлайн', 'задача', 'привычк', 'напомн', 'погод', 'кино', 'новост', 'курс', 'профиль', 'помощь', 'статистик', 'заметк', 'календар', 'дашборд', 'сброс', 'reset', 'здоровье', 'психо', 'дерево']
+    safe = ['меню', 'инлайн', 'задача', 'привычк', 'напомн', 'погод', 'кино', 'новост', 'курс', 'профиль', 'помощь', 'статистик', 'заметк', 'календар', 'дашборд', 'сброс', 'reset', 'здоровье', 'психо', 'дерево', 'семья', 'семейный']
     if any(s in text.lower() for s in safe): return text
     if text.isascii() and text.isalpha():
         c = ''.join(LAYOUT_MAP.get(ch.lower(), ch) for ch in text)
@@ -166,7 +166,7 @@ def should_reset_context(text: str) -> bool:
 
 def is_topic_change(text: str, current_mode: str) -> bool:
     t = text.lower()
-    util_keywords = ["задача", "заметк", "календар", "погод", "курс", "кино", "новост", "дашборд", "меню", "дерево", "статистик"]
+    util_keywords = ["задача", "заметк", "календар", "погод", "курс", "кино", "новост", "дашборд", "меню", "дерево", "статистик", "семья", "профиль"]
     if any(k in t for k in util_keywords): return True
     if current_mode == "psycho" and any(k in t for k in ["давление", "голова", "сон", "питание", "здоров"]): return True
     if current_mode == "health" and any(k in t for k in ["чувствую", "эмоц", "отношен", "мысль", "тревож"]): return True
@@ -191,16 +191,17 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS message_tags(id SERIAL PRIMARY KEY, user_id BIGINT, message_id BIGINT, tags TEXT[], topic TEXT, created_at TIMESTAMP DEFAULT NOW());
         CREATE TABLE IF NOT EXISTS response_log(id SERIAL PRIMARY KEY, user_id BIGINT, content_hash TEXT, created_at TIMESTAMP DEFAULT NOW());
         CREATE TABLE IF NOT EXISTS notes(id SERIAL PRIMARY KEY, user_id BIGINT, content TEXT, created_at TIMESTAMP DEFAULT NOW(), tags TEXT[], category TEXT DEFAULT 'general', parent_id INTEGER REFERENCES notes(id) ON DELETE CASCADE);
-        CREATE TABLE IF NOT EXISTS calendar_events(id SERIAL PRIMARY KEY, user_id BIGINT, title TEXT, description TEXT, event_date TIMESTAMP, reminder_before INTERVAL, recurrence TEXT, category TEXT DEFAULT 'general', created_at TIMESTAMP DEFAULT NOW());
+        CREATE TABLE IF NOT EXISTS calendar_events(id SERIAL PRIMARY KEY, user_id BIGINT, title TEXT, description TEXT, event_date TIMESTAMP, reminder_before INTERVAL, recurrence TEXT, category TEXT DEFAULT 'general', created_at TIMESTAMP DEFAULT NOW(), visibility TEXT DEFAULT 'private');
         """)
         
-        # Задачи с поддержкой связанных заметок
+        # Задачи с поддержкой связанных заметок и видимости
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS tasks(
             id SERIAL PRIMARY KEY, user_id BIGINT, title TEXT NOT NULL, description TEXT, status TEXT DEFAULT 'pending',
             priority TEXT DEFAULT 'medium', due_date TIMESTAMP, category TEXT DEFAULT 'general', tags TEXT[],
             parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE, recurrence TEXT, attachments TEXT[],
-            linked_note_ids INTEGER[] DEFAULT '{}', created_at TIMESTAMP DEFAULT NOW(), completed_at TIMESTAMP, checklist JSONB DEFAULT '[]'
+            linked_note_ids INTEGER[] DEFAULT '{}', created_at TIMESTAMP DEFAULT NOW(), completed_at TIMESTAMP, checklist JSONB DEFAULT '[]',
+            visibility TEXT DEFAULT 'private', assigned_to BIGINT REFERENCES users(user_id)
         );""")
         
         # Профиль с поддержкой новых полей
@@ -210,8 +211,33 @@ async def init_db():
             last_quote_index INTEGER DEFAULT 0, last_fact_index INTEGER DEFAULT 0, mode TEXT DEFAULT 'general',
             health_context TEXT DEFAULT '', psycho_context TEXT DEFAULT '', 
             preferred_tone TEXT DEFAULT 'balanced', last_activity_patterns JSONB DEFAULT '{}',
+            age_group TEXT DEFAULT 'adult', language TEXT DEFAULT 'ru',
             created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW()
         );""")
+        
+        # 🔥 НОВЫЕ ТАБЛИЦЫ: Долгосрочная память + Семейные группы
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_insights(
+            id SERIAL PRIMARY KEY, user_id BIGINT, key TEXT, value JSONB, updated_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(user_id, key)
+        );
+        """)
+        
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS family_groups(
+            id SERIAL PRIMARY KEY, name TEXT, created_by BIGINT REFERENCES users(user_id), created_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
+        
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS family_members(
+            user_id BIGINT PRIMARY KEY REFERENCES users(user_id),
+            group_id INTEGER REFERENCES family_groups(id) ON DELETE CASCADE,
+            role TEXT DEFAULT 'member',  -- admin, member, child
+            nickname TEXT,
+            joined_at TIMESTAMP DEFAULT NOW()
+        );
+        """)
         
         # Миграции
         migrations = [
@@ -230,6 +256,7 @@ async def init_db():
             "ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS recurrence TEXT",
             "ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'general'",
             "ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
+            "ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS visibility TEXT DEFAULT 'private'",
             "ALTER TABLE response_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'general'",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS tags TEXT[]",
@@ -239,6 +266,8 @@ async def init_db():
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS linked_note_ids INTEGER[] DEFAULT '{}'",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS checklist JSONB DEFAULT '[]'",
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS visibility TEXT DEFAULT 'private'",
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assigned_to BIGINT REFERENCES users(user_id)",
             "ALTER TABLE profile ADD COLUMN IF NOT EXISTS city TEXT DEFAULT 'Москва'",
             "ALTER TABLE profile ADD COLUMN IF NOT EXISTS last_quote_index INTEGER DEFAULT 0",
             "ALTER TABLE profile ADD COLUMN IF NOT EXISTS last_fact_index INTEGER DEFAULT 0",
@@ -248,6 +277,8 @@ async def init_db():
             "ALTER TABLE profile ADD COLUMN IF NOT EXISTS psycho_context TEXT DEFAULT ''",
             "ALTER TABLE profile ADD COLUMN IF NOT EXISTS preferred_tone TEXT DEFAULT 'balanced'",
             "ALTER TABLE profile ADD COLUMN IF NOT EXISTS last_activity_patterns JSONB DEFAULT '{}'",
+            "ALTER TABLE profile ADD COLUMN IF NOT EXISTS age_group TEXT DEFAULT 'adult'",
+            "ALTER TABLE profile ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'ru'",
         ]
         for sql in migrations:
             try: await conn.execute(sql)
@@ -264,17 +295,21 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(user_id, parent_id)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_due ON tasks(user_id, due_date) WHERE status='pending'",
             "CREATE INDEX IF NOT EXISTS idx_tasks_linked ON tasks(user_id) WHERE array_length(linked_note_ids, 1) > 0",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_to) WHERE assigned_to IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_response_log ON response_log(user_id, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_notes_user ON notes(user_id, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS idx_notes_parent ON notes(user_id, parent_id)",
             "CREATE INDEX IF NOT EXISTS idx_notes_category ON notes(user_id, category)",
             "CREATE INDEX IF NOT EXISTS idx_calendar_user ON calendar_events(user_id, event_date)",
             "CREATE INDEX IF NOT EXISTS idx_calendar_category ON calendar_events(user_id, category)",
+            "CREATE INDEX IF NOT EXISTS idx_insights_user ON user_insights(user_id, key)",
+            "CREATE INDEX IF NOT EXISTS idx_family_user ON family_members(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_family_group ON family_members(group_id)",
         ]
         for sql in indexes:
             try: await conn.execute(sql)
             except: pass
-    logging.info("✅ PostgreSQL initialized + v4.7 features (linked notes + smart habits)")
+    logging.info("✅ PostgreSQL initialized + v4.8 features (insights + family + adaptive)")
 
 # ======================
 #  🔥 ОЧИСТКА КОНТЕКСТА
@@ -310,6 +345,251 @@ async def get_psycho_context(uid: int) -> list:
 async def save_psycho_context(uid: int, ctx: list):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE profile SET psycho_context=$1 WHERE user_id=$2", json.dumps(ctx[-8:]), uid)
+
+# ======================
+#  🔥 ДОЛГОСРОЧНАЯ ПАМЯТЬ (USER INSIGHTS)
+# ======================
+async def save_user_insight(uid: int, key: str, value):
+    """Сохраняет долгосрочный инсайт о пользователе"""
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO user_insights(user_id, key, value) VALUES ($1, $2, $3) ON CONFLICT(user_id, key) DO UPDATE SET value = $3, updated_at = NOW()",
+            uid, key, json.dumps(value) if not isinstance(value, str) else value
+        )
+
+async def get_user_insight(uid: int, key: str):
+    """Получает инсайт по ключу"""
+    async with db_pool.acquire() as conn:
+        raw = await conn.fetchval("SELECT value FROM user_insights WHERE user_id=$1 AND key=$2", uid, key)
+        if raw is None: return None
+        try: return json.loads(raw)
+        except: return raw
+
+async def get_user_profile_context(uid: int) -> dict:
+    """Собирает полный контекст пользователя для адаптивных ответов"""
+    profile = await get_profile(uid)
+    if not profile: return {}
+    
+    insights = {}
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT key, value FROM user_insights WHERE user_id=$1", uid)
+        for r in rows:
+            try: insights[r["key"]] = json.loads(r["value"])
+            except: insights[r["key"]] = r["value"]
+    
+    # Определяем age_group, если не задан
+    age = profile.get("age")
+    if age and not profile.get("age_group"):
+        if age < 12: age_group = "child"
+        elif age < 18: age_group = "teen"
+        elif age < 60: age_group = "adult"
+        else: age_group = "senior"
+    else:
+        age_group = profile.get("age_group", "adult")
+    
+    return {
+        "name": profile.get("name"),
+        "age": age,
+        "age_group": age_group,
+        "gender": profile.get("gender"),
+        "city": profile.get("city", CITY_DEFAULT),
+        "preferred_tone": profile.get("preferred_tone", "balanced"),
+        "language": profile.get("language", "ru"),
+        "insights": insights
+    }
+
+# ======================
+#  🔥 СЕМЕЙНЫЕ ГРУППЫ (MULTI-PROFILE)
+# ======================
+async def create_family_group(name: str, created_by: int):
+    async with db_pool.acquire() as conn:
+        group_id = await conn.fetchval("INSERT INTO family_groups(name, created_by) VALUES ($1, $2) RETURNING id", name, created_by)
+        # Создатель становится админом
+        await conn.execute("INSERT INTO family_members(user_id, group_id, role, nickname) VALUES ($1, $2, 'admin', 'Я')", created_by, group_id)
+        return group_id
+
+async def join_family_group(uid: int, group_id: int, role: str = "member", nickname: str = None):
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO family_members(user_id, group_id, role, nickname) VALUES ($1, $2, $3, $4) ON CONFLICT(user_id) DO UPDATE SET group_id = $2, role = $3, nickname = COALESCE($4, family_members.nickname)",
+            uid, group_id, role, nickname
+        )
+
+async def get_user_family(uid: int):
+    """Возвращает информацию о семье пользователя"""
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT fm.group_id, fm.role, fm.nickname, fg.name as group_name
+            FROM family_members fm
+            JOIN family_groups fg ON fm.group_id = fg.id
+            WHERE fm.user_id = $1
+        """, uid)
+        return dict(row) if row else None
+
+async def get_family_members(group_id: int):
+    async with db_pool.acquire() as conn:
+        return await conn.fetch("""
+            SELECT u.user_id, u.name, u.age, u.gender, fm.role, fm.nickname
+            FROM family_members fm
+            JOIN users u ON fm.user_id = u.user_id
+            WHERE fm.group_id = $1
+        """, group_id)
+
+async def get_shared_tasks(uid: int):
+    """Получает задачи, видимые пользователю (личные + семейные)"""
+    family = await get_user_family(uid)
+    async with db_pool.acquire() as conn:
+        if family:
+            # Личные + семейные задачи
+            tasks = await conn.fetch("""
+                SELECT t.*, u.name as assigned_name
+                FROM tasks t
+                LEFT JOIN users u ON t.assigned_to = u.user_id
+                WHERE (t.user_id = $1 AND t.visibility = 'private')
+                   OR (t.visibility = 'family' AND EXISTS (
+                       SELECT 1 FROM family_members fm WHERE fm.group_id = $2 AND fm.user_id = t.user_id
+                   ))
+                ORDER BY t.due_date ASC NULLS LAST, t.created_at DESC
+            """, uid, family["group_id"])
+        else:
+            # Только личные
+            tasks = await conn.fetch("""
+                SELECT t.*, u.name as assigned_name
+                FROM tasks t
+                LEFT JOIN users u ON t.assigned_to = u.user_id
+                WHERE t.user_id = $1
+                ORDER BY t.due_date ASC NULLS LAST, t.created_at DESC
+            """, uid)
+        return tasks
+
+async def get_shared_calendar(uid: int, from_date=None, to_date=None):
+    """Получает события, видимые пользователю"""
+    family = await get_user_family(uid)
+    async with db_pool.acquire() as conn:
+        query = """
+            SELECT * FROM calendar_events
+            WHERE (user_id = $1 AND visibility = 'private')
+               OR (visibility = 'family' AND EXISTS (
+                   SELECT 1 FROM family_members fm WHERE fm.group_id = $2 AND fm.user_id = calendar_events.user_id
+               ))
+        """
+        params = [uid]
+        if family: params.append(family["group_id"])
+        else: params.append(-1)  # dummy
+        
+        if from_date: query += " AND event_date >= $3"; params.append(from_date)
+        if to_date: query += " AND event_date <= $4" if from_date else " AND event_date <= $3"; params.append(to_date if from_date else to_date)
+        query += " ORDER BY event_date ASC LIMIT $%d" % (len(params)+1)
+        params.append(20)
+        return await conn.fetch(query, *params)
+
+# ======================
+#  🔥 АДАПТИВНЫЙ ТОН (AGE/GENDER/TONE AWARE)
+# ======================
+def get_age_appropriate_style(age_group: str, gender: str = None) -> dict:
+    """Возвращает параметры стиля ответа в зависимости от возраста и пола"""
+    styles = {
+        "child": {
+            "max_tokens": 200,
+            "temperature": 0.9,
+            "emoji_level": "high",
+            "complexity": "simple",
+            "gamification": True,
+            "prefix": "🌟 ",
+            "suffix": " 💫",
+            "tone_modifiers": ["будь как старший друг", "объясняй просто", "добавляй эмодзи", "хвали за усилия"]
+        },
+        "teen": {
+            "max_tokens": 300,
+            "temperature": 0.85,
+            "emoji_level": "medium",
+            "complexity": "moderate",
+            "gamification": True,
+            "prefix": "🔥 ",
+            "suffix": " ✨",
+            "tone_modifiers": ["будь на равных", "не поучай", "используй современный сленг умеренно", "поддерживай"]
+        },
+        "adult": {
+            "max_tokens": 500,
+            "temperature": 0.75,
+            "emoji_level": "low",
+            "complexity": "detailed",
+            "gamification": False,
+            "prefix": "",
+            "suffix": "",
+            "tone_modifiers": ["будь конкретным", "уважай время", "давай варианты, не навязывай"]
+        },
+        "senior": {
+            "max_tokens": 400,
+            "temperature": 0.7,
+            "emoji_level": "low",
+            "complexity": "clear",
+            "gamification": False,
+            "prefix": "🤝 ",
+            "suffix": " 🙏",
+            "tone_modifiers": ["будь терпеливым", "объясняй пошагово", "избегай сленга", "проявляй заботу"]
+        }
+    }
+    
+    base = styles.get(age_group, styles["adult"])
+    
+    # Гендерные нюансы (мягкие, без стереотипов)
+    if gender == "female" and age_group in ["teen", "adult"]:
+        base["tone_modifiers"].append("будь эмпатичным, но не снисходительным")
+    elif gender == "male" and age_group in ["teen", "adult"]:
+        base["tone_modifiers"].append("будь прямым, но поддерживающим")
+    
+    return base
+
+def format_response_for_user(text: str, user_ctx: dict) -> str:
+    """Форматирует ответ с учётом возраста, пола и предпочтений"""
+    style = get_age_appropriate_style(user_ctx["age_group"], user_ctx["gender"])
+    
+    # Добавляем префикс/суффикс
+    if style["emoji_level"] != "none":
+        text = f"{style['prefix']}{text}{style['suffix']}"
+    
+    # Для детей: добавляем поощрение
+    if user_ctx["age_group"] == "child" and style["gamification"]:
+        if random.random() < 0.3:  # 30% шансов
+            encouragements = ["Молодец! 🎉", "Так держать! 🏆", "Ты супер! ⭐", "Горжусь тобой! 💪"]
+            text += f"\n\n{random.choice(encouragements)}"
+    
+    return text
+
+# ======================
+#  🔥 КОНТЕКСТНЫЙ БРИДЖ (MODE TRANSITIONS)
+# ======================
+def suggest_mode_bridge(from_mode: str, to_mode: str, context: dict) -> str | None:
+    """Предлагает естественный переход между режимами"""
+    bridges = {
+        ("psycho", "tasks"): "Хочешь разбить это на конкретные шаги? Могу помочь создать задачу. 📋",
+        ("psycho", "habits"): "Чтобы закрепить прогресс, можем добавить маленькую привычку. Что скажешь? 🔁",
+        ("health", "habits"): "Это отлично сочетается с привычкой. Хочешь, добавим её в трекер? 🔁",
+        ("health", "psycho"): "Если это вызывает тревогу, можем обсудить это в режиме психоанализа. 🧠",
+        ("tasks", "calendar"): "Хочешь поставить напоминание в календарь? 📅",
+        ("notes", "tasks"): "Эту идею можно превратить в задачу. Создать? 📋",
+    }
+    return bridges.get((from_mode, to_mode))
+
+async def update_activity_pattern(uid: int, activity_type: str, timestamp: datetime):
+    """Обновляет паттерны активности пользователя для умных напоминаний"""
+    hour = timestamp.hour
+    day_of_week = timestamp.weekday()
+    
+    # Получаем текущие паттерны
+    patterns = await get_user_insight(uid, "activity_patterns") or {}
+    
+    # Обновляем статистику по часам
+    hour_key = f"hour_{hour}"
+    patterns[hour_key] = patterns.get(hour_key, 0) + 1
+    
+    # Обновляем по дням недели
+    day_key = f"day_{day_of_week}"
+    patterns[day_key] = patterns.get(day_key, 0) + 1
+    
+    # Сохраняем
+    await save_user_insight(uid, "activity_patterns", patterns)
 
 # ======================
 #  🔥 ANTI-LOOP
@@ -368,26 +648,45 @@ async def get_news_data() -> list | None:
 def get_news_link() -> str: return "https://news.yandex.ru/"
 
 # ======================
-#  🔥 ЗАДАЧИ (с поддержкой связанных заметок)
+#  🔥 ЗАДАЧИ (с поддержкой связанных заметок и семейного доступа)
 # ======================
-async def create_task(uid, title, description=None, priority="medium", due_date=None, category="general", tags=None, parent_id=None, recurrence=None, attachments=None, checklist=None, linked_note_ids=None):
+async def create_task(uid, title, description=None, priority="medium", due_date=None, category="general", tags=None, parent_id=None, recurrence=None, attachments=None, checklist=None, linked_note_ids=None, visibility="private", assigned_to=None):
     async with db_pool.acquire() as conn:
         return await conn.fetchval(
-            "INSERT INTO tasks(user_id, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, linked_note_ids, checklist) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id",
-            uid, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, linked_note_ids or [], json.dumps(checklist) if checklist else '[]'
+            "INSERT INTO tasks(user_id, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, linked_note_ids, checklist, visibility, assigned_to) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14) RETURNING id",
+            uid, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, linked_note_ids or [], json.dumps(checklist) if checklist else '[]', visibility, assigned_to
         )
 
-async def get_tasks(uid, status="pending", category=None, parent_id=None, due_date_range=None, with_linked_notes=False):
+async def get_tasks(uid, status="pending", category=None, parent_id=None, due_date_range=None, with_linked_notes=False, include_shared=True):
     async with db_pool.acquire() as conn:
-        query = "SELECT id, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, linked_note_ids, checklist, created_at FROM tasks WHERE user_id=$1 AND status=$2"
-        params = [uid, status]
+        if include_shared:
+            family = await get_user_family(uid)
+            if family:
+                query = """
+                    SELECT t.id, t.title, t.description, t.priority, t.due_date, t.category, t.tags, t.parent_id, t.recurrence, t.attachments, t.linked_note_ids, t.checklist, t.created_at, t.visibility, t.assigned_to, u.name as assigned_name
+                    FROM tasks t
+                    LEFT JOIN users u ON t.assigned_to = u.user_id
+                    WHERE (t.user_id = $1 AND t.visibility = 'private')
+                       OR (t.visibility = 'family' AND EXISTS (
+                           SELECT 1 FROM family_members fm WHERE fm.group_id = $2 AND fm.user_id = t.user_id
+                       ))
+                    AND t.status = $3
+                """
+                params = [uid, family["group_id"], status]
+            else:
+                query = "SELECT t.id, t.title, t.description, t.priority, t.due_date, t.category, t.tags, t.parent_id, t.recurrence, t.attachments, t.linked_note_ids, t.checklist, t.created_at, t.visibility, t.assigned_to, u.name as assigned_name FROM tasks t LEFT JOIN users u ON t.assigned_to = u.user_id WHERE t.user_id=$1 AND t.status=$2"
+                params = [uid, status]
+        else:
+            query = "SELECT id, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, linked_note_ids, checklist, created_at FROM tasks WHERE user_id=$1 AND status=$2"
+            params = [uid, status]
+        
         if category: query += " AND category=$3"; params.append(category)
         if parent_id is not None:
             query += " AND parent_id=$3" if not category else " AND parent_id=$4"; params.append(parent_id)
         if due_date_range:
             query += " AND due_date >= $3 AND due_date <= $4" if not category and parent_id is None else " AND due_date >= $4 AND due_date <= $5"
             params.extend(due_date_range)
-        query += " ORDER BY due_date ASC NULLS LAST, created_at DESC"
+        query += " ORDER BY due_date ASC NULLS LAST, created_at DESC LIMIT 20"
         tasks = await conn.fetch(query, *params)
         
         if with_linked_notes and tasks:
@@ -434,19 +733,17 @@ async def get_notes(uid, limit=10, search=None, category=None, parent_id=None, r
         if search: query += " AND (content ILIKE $2 OR tags::text ILIKE $2)"; params.append(f"%{search}%")
         if category: query += " AND category=$2" if not search else " AND category=$3"; params.append(category)
         if parent_id is not None: query += " AND parent_id=$2" if not search and not category else f" AND parent_id=${len(params)+1}"; params.append(parent_id)
-        elif not recursive: query += " AND parent_id IS NULL"  # Только корневые, если не рекурсия
+        elif not recursive: query += " AND parent_id IS NULL"
         query += f" ORDER BY created_at DESC LIMIT ${len(params)+1}"; params.append(limit)
         notes = await conn.fetch(query, *params)
         
         if recursive and notes:
-            # Рекурсивно получаем подзаметки
             for note in notes:
                 children = await conn.fetch("SELECT id, content, tags, category, parent_id, created_at FROM notes WHERE user_id=$1 AND parent_id=$2 ORDER BY created_at", uid, note["id"])
                 note["children"] = children
         return notes
 
 async def get_note_tree(uid, root_id=None):
-    """Получает дерево заметок начиная с root_id (или все корневые)"""
     async with db_pool.acquire() as conn:
         if root_id:
             root = await conn.fetchrow("SELECT id, content, tags, category, parent_id, created_at FROM notes WHERE id=$1 AND user_id=$2", root_id, uid)
@@ -467,19 +764,35 @@ async def delete_note(uid, note_id):
 # ======================
 #  🔥 КАЛЕНДАРЬ
 # ======================
-async def create_calendar_event(uid, title, description, event_date, reminder_before=None, recurrence=None, category="general"):
+async def create_calendar_event(uid, title, description, event_date, reminder_before=None, recurrence=None, category="general", visibility="private"):
     async with db_pool.acquire() as conn:
         return await conn.fetchval(
-            "INSERT INTO calendar_events(user_id, title, description, event_date, reminder_before, recurrence, category) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
-            uid, title, description, event_date, reminder_before, recurrence, category
+            "INSERT INTO calendar_events(user_id, title, description, event_date, reminder_before, recurrence, category, visibility) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id",
+            uid, title, description, event_date, reminder_before, recurrence, category, visibility
         )
 
-async def get_calendar_events(uid, from_date=None, to_date=None, category=None, limit=10):
+async def get_calendar_events(uid, from_date=None, to_date=None, category=None, limit=10, include_shared=True):
     async with db_pool.acquire() as conn:
-        query = "SELECT id, title, description, event_date, reminder_before, recurrence, category FROM calendar_events WHERE user_id=$1"
-        params = [uid]
-        if from_date: query += " AND event_date >= $2"; params.append(from_date)
-        if to_date: query += " AND event_date <= $3" if from_date else " AND event_date <= $2"; params.append(to_date if from_date else to_date)
+        if include_shared:
+            family = await get_user_family(uid)
+            if family:
+                query = """
+                    SELECT * FROM calendar_events
+                    WHERE (user_id = $1 AND visibility = 'private')
+                       OR (visibility = 'family' AND EXISTS (
+                           SELECT 1 FROM family_members fm WHERE fm.group_id = $2 AND fm.user_id = calendar_events.user_id
+                       ))
+                """
+                params = [uid, family["group_id"]]
+            else:
+                query = "SELECT * FROM calendar_events WHERE user_id=$1"
+                params = [uid]
+        else:
+            query = "SELECT * FROM calendar_events WHERE user_id=$1"
+            params = [uid]
+        
+        if from_date: query += " AND event_date >= $3"; params.append(from_date)
+        if to_date: query += " AND event_date <= $4" if from_date else " AND event_date <= $3"; params.append(to_date if from_date else to_date)
         if category: query += f" AND category=${len(params)+1}"; params.append(category)
         query += f" ORDER BY event_date ASC LIMIT ${len(params)+1}"; params.append(limit)
         return await conn.fetch(query, *params)
@@ -503,28 +816,23 @@ async def get_habits(uid):
 async def complete_habit(uid, habit_id, note=None):
     async with db_pool.acquire() as conn:
         today = now_moscow().date()
-        # Обновляем streak и last_done
         await conn.execute(
             "UPDATE habits SET streak = CASE WHEN last_done = $2 THEN streak ELSE streak + 1 END, last_done = $2 WHERE id=$1 AND user_id=$3",
             habit_id, today, uid
         )
-        # Записываем лог выполнения
         await conn.execute("INSERT INTO habit_logs(habit_id, note) VALUES ($1, $2)", habit_id, note)
+        # Обновляем паттерн активности
+        await update_activity_pattern(uid, "habit_complete", now_moscow())
 
 async def get_habit_progress(uid, habit_id, days=7):
-    """Возвращает прогресс привычки за последние N дней"""
     async with db_pool.acquire() as conn:
         habit = await conn.fetchrow("SELECT name, frequency, target_per_week, schedule_json FROM habits WHERE id=$1 AND user_id=$2", habit_id, uid)
         if not habit: return None
-        
-        # Получаем логи за период
         logs = await conn.fetch(
             "SELECT completed_at::date as day FROM habit_logs WHERE habit_id=$1 AND completed_at >= NOW() - INTERVAL '%s days' ORDER BY day" % days,
             habit_id
         )
         completed_days = {log["day"] for log in logs}
-        
-        # Генерируем дни для отображения
         result = []
         for i in range(days-1, -1, -1):
             day = (now_moscow().date() - timedelta(days=i))
@@ -532,7 +840,6 @@ async def get_habit_progress(uid, habit_id, days=7):
         return {"name": habit["name"], "frequency": habit["frequency"], "target": habit["target_per_week"], "schedule": habit["schedule_json"], "history": result}
 
 async def get_habits_progress(uid, period="week"):
-    """Прогресс всех привычек за период (week/month)"""
     days = 7 if period == "week" else 30
     async with db_pool.acquire() as conn:
         habits = await conn.fetch("SELECT id, name, frequency, target_per_week, schedule_json, last_done FROM habits WHERE user_id=$1", uid)
@@ -557,21 +864,21 @@ async def get_habits_progress(uid, period="week"):
 # ======================
 async def get_profile(uid):
     async with db_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT name, age, gender, city, mode, preferred_tone FROM profile WHERE user_id=$1", uid)
+        row = await conn.fetchrow("SELECT name, age, gender, city, mode, preferred_tone, age_group, language FROM profile WHERE user_id=$1", uid)
         return dict(row) if row else None
 
-async def save_profile(uid, name=None, age=None, gender=None, city=None, preferred_tone=None):
+async def save_profile(uid, name=None, age=None, gender=None, city=None, preferred_tone=None, age_group=None, language=None):
     async with db_pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO profile(user_id, name, age, gender, city, preferred_tone) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT(user_id) DO UPDATE SET name = COALESCE($2, profile.name), age = COALESCE($3, profile.age), gender = COALESCE($4, profile.gender), city = COALESCE($5, profile.city), preferred_tone = COALESCE($6, profile.preferred_tone), updated_at = NOW()",
-            uid, name, age, gender, city, preferred_tone
+            "INSERT INTO profile(user_id, name, age, gender, city, preferred_tone, age_group, language) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT(user_id) DO UPDATE SET name = COALESCE($2, profile.name), age = COALESCE($3, profile.age), gender = COALESCE($4, profile.gender), city = COALESCE($5, profile.city), preferred_tone = COALESCE($6, profile.preferred_tone), age_group = COALESCE($7, profile.age_group), language = COALESCE($8, profile.language), updated_at = NOW()",
+            uid, name, age, gender, city, preferred_tone, age_group, language
         )
 
 # ======================
-#  🔥 ДАШБОРД 2.0 (связанные заметки + прогресс привычек)
+#  🔥 ДАШБОРД 3.0 (семейный вид + инсайты)
 # ======================
-async def get_dashboard_data(uid: int, profile: dict) -> dict:
-    city = profile.get("city", CITY_DEFAULT) if profile else CITY_DEFAULT
+async def get_dashboard_data(uid: int, profile_ctx: dict, view_mode: str = "personal") -> dict:
+    city = profile_ctx.get("city", CITY_DEFAULT)
     now = now_moscow()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
@@ -579,13 +886,13 @@ async def get_dashboard_data(uid: int, profile: dict) -> dict:
     # Параллельный запрос данных
     weather, tasks, events, habits_prog = await asyncio.gather(
         get_weather_data(city),
-        get_tasks(uid, status="pending", due_date_range=(today_start, today_end), with_linked_notes=True),
-        get_calendar_events(uid, from_date=now, to_date=now+timedelta(hours=12)),
+        get_tasks(uid, status="pending", due_date_range=(today_start, today_end), with_linked_notes=True, include_shared=(view_mode=="family")),
+        get_calendar_events(uid, from_date=now, to_date=now+timedelta(hours=12), include_shared=(view_mode=="family")),
         get_habits_progress(uid, period="week"),
         return_exceptions=True
     )
     
-    # Получаем связанные заметки для задач (если есть)
+    # Получаем связанные заметки для задач
     task_notes = {}
     if tasks and not isinstance(tasks, Exception):
         note_ids = [nid for t in tasks for nid in (t.get("linked_note_ids") or [])]
@@ -593,6 +900,12 @@ async def get_dashboard_data(uid: int, profile: dict) -> dict:
             async with db_pool.acquire() as conn:
                 notes = await conn.fetch("SELECT id, content, category FROM notes WHERE id = ANY($1)", note_ids)
                 task_notes = {n["id"]: n for n in notes}
+    
+    # Получаем инсайты для дашборда
+    insights = {}
+    if view_mode == "personal":
+        insights["mood_trend"] = await get_user_insight(uid, "mood_trend")
+        insights["productivity_hours"] = await get_user_insight(uid, "productivity_hours")
     
     return {
         "weather": weather if not isinstance(weather, Exception) else None,
@@ -602,11 +915,17 @@ async def get_dashboard_data(uid: int, profile: dict) -> dict:
         "events_12h": events if not isinstance(events, Exception) else [],
         "habits_progress": habits_prog if not isinstance(habits_prog, Exception) else [],
         "stats": await get_task_stats(uid) if not isinstance(tasks, Exception) else None,
-        "time": now.strftime("%H:%M")
+        "time": now.strftime("%H:%M"),
+        "view_mode": view_mode,
+        "insights": insights,
+        "user_ctx": profile_ctx
     }
 
-def format_dashboard(data: dict) -> str:
-    lines = [f"📊 **Дашборд** • {data['time']}"]
+def format_dashboard( dict) -> str:
+    user_ctx = data.get("user_ctx", {})
+    style = get_age_appropriate_style(user_ctx.get("age_group", "adult"), user_ctx.get("gender"))
+    
+    lines = [f"{style['prefix']}📊 **Дашборд** • {data['time']}{style['suffix']}"]
     
     # Погода
     if data["weather"]:
@@ -615,14 +934,15 @@ def format_dashboard(data: dict) -> str:
     
     # Задачи + связанные заметки
     if data["tasks_today"]:
-        lines.append(f"\n📋 **Задачи на сегодня** ({len(data['tasks_today'])}):")
+        view_label = " (семейные)" if data.get("view_mode") == "family" else ""
+        lines.append(f"\n📋 **Задачи на сегодня**{view_label} ({len(data['tasks_today'])}):")
         for t in data["tasks_today"][:3]:
             icon = {"high":"🔴","medium":"🟡","low":"🟢"}.get(t["priority"],"⚪")
             due = f" ({t['due_date'].strftime('%H:%M')})" if t["due_date"] else ""
-            lines.append(f"{icon} {t['title']}{due}")
-            # Показываем связанные заметки
-            if t.get("linked_note_ids") and data["task_notes"]:
-                for nid in t["linked_note_ids"]:
+            assigned = f" 👤 {t['assigned_name']}" if t.get("assigned_name") and t["assigned_to"] != data.get("user_ctx", {}).get("user_id") else ""
+            lines.append(f"{icon} {t['title']}{due}{assigned}")
+            if t.get("linked_notes") and data["task_notes"]:
+                for nid in t["linked_note_ids"] or []:
                     note = data["task_notes"].get(nid)
                     if note:
                         preview = note["content"][:40] + "..." if len(note["content"]) > 40 else note["content"]
@@ -632,7 +952,8 @@ def format_dashboard(data: dict) -> str:
     if data["events_12h"]:
         lines.append(f"\n📅 **События**:")
         for e in data["events_12h"][:3]:
-            lines.append(f"• {e['event_date'].strftime('%H:%M')} — {e['title']}")
+            vis = "👥 " if e["visibility"] == "family" else ""
+            lines.append(f"• {vis}{e['event_date'].strftime('%H:%M')} — {e['title']}")
     
     # Привычки с прогрессом
     if data["habits_progress"]:
@@ -641,38 +962,46 @@ def format_dashboard(data: dict) -> str:
             bar = "█" * (h["percent"]//10) + "░" * (10 - h["percent"]//10)
             lines.append(f"• {h['name']}: [{bar}] {h['completed']}/{h['target']} ({h['percent']}%)")
     
+    # Инсайты (только в личном режиме)
+    if data.get("insights") and data.get("view_mode") == "personal":
+        if data["insights"].get("productivity_hours"):
+            peak = data["insights"]["productivity_hours"]
+            lines.append(f"\n💡 **Инсайт**: Ты наиболее продуктивен в {peak}:00–{peak+2}:00")
+    
     return "\n".join(lines)
 
 # ======================
-#  🔥 УМНЫЕ НАПОМИНАНИЯ (анализ паттернов)
+#  🔥 УМНЫЕ НАПОМИНАНИЯ (на основе паттернов)
 # ======================
-async def get_optimal_reminder_time(uid: int, habit_name: str) -> str | None:
-    """Анализирует историю и предлагает оптимальное время для напоминания"""
-    async with db_pool.acquire() as conn:
-        # Получаем историю выполнений привычки
-        logs = await conn.fetch("""
-            SELECT EXTRACT(HOUR FROM completed_at) as hour, COUNT(*) as cnt
-            FROM habit_logs hl
-            JOIN habits h ON hl.habit_id = h.id
-            WHERE h.user_id=$1 AND h.name=$2 AND completed_at >= NOW() - INTERVAL '30 days'
-            GROUP BY hour ORDER BY cnt DESC LIMIT 1
-        """, uid, habit_name)
-        if logs:
-            hour = int(logs[0]["hour"])
-            return f"{hour:02d}:00"
+async def get_optimal_reminder_time(uid: int, activity_type: str) -> str | None:
+    patterns = await get_user_insight(uid, "activity_patterns")
+    if not patterns: return None
+    
+    # Находим час с максимальной активностью
+    hour_counts = {k.replace("hour_", ""): v for k, v in patterns.items() if k.startswith("hour_")}
+    if hour_counts:
+        best_hour = max(hour_counts, key=hour_counts.get)
+        return f"{int(best_hour):02d}:00"
     return None
 
 # ======================
 #  INLINE КЛАВИАТУРЫ / FSM
 # ======================
-def main_menu_keyboard():
+def main_menu_keyboard(family_mode: bool = False):
+    family_btn = InlineKeyboardButton(text="👨‍👩‍👧‍👦 Семья", callback_data="family_view") if family_mode else InlineKeyboardButton(text="👤 Профиль", callback_data="profile_show")
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Задачи", callback_data="tasks_list"), InlineKeyboardButton(text="📝 Заметки", callback_data="notes_list")],
         [InlineKeyboardButton(text="🌳 Дерево", callback_data="notes_tree"), InlineKeyboardButton(text="📅 Календарь", callback_data="calendar_list")],
         [InlineKeyboardButton(text="🔁 Привычки", callback_data="habits_list"), InlineKeyboardButton(text="📊 Дашборд", callback_data="dashboard_show")],
         [InlineKeyboardButton(text="🌤 Погода", callback_data="ext_weather"), InlineKeyboardButton(text="🧠 Психоанализ", callback_data="ext_psycho")],
         [InlineKeyboardButton(text="🎬 Афиша", callback_data="ext_cinema"), InlineKeyboardButton(text="📰 Новости", callback_data="ext_news")],
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile_show"), InlineKeyboardButton(text="❓ Помощь", callback_data="help_show")],
+        [family_btn, InlineKeyboardButton(text="❓ Помощь", callback_data="help_show")],
+    ])
+
+def family_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Участники", callback_data="family_members"), InlineKeyboardButton(text="➕ Пригласить", callback_data="family_invite")],
+        [InlineKeyboardButton(text="🔄 Личный режим", callback_data="family_personal")],
     ])
 
 def note_tree_keyboard(parent_id=None):
@@ -685,13 +1014,13 @@ def profile_edit_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Имя", callback_data="profile_edit_name"), InlineKeyboardButton(text="✏️ Возраст", callback_data="profile_edit_age")],
         [InlineKeyboardButton(text="✏️ Город", callback_data="profile_edit_city"), InlineKeyboardButton(text="✏️ Пол", callback_data="profile_edit_gender")],
-        [InlineKeyboardButton(text="✅ Готово", callback_data="profile_done")]
+        [InlineKeyboardButton(text="✏️ Группа", callback_data="profile_edit_agegroup"), InlineKeyboardButton(text="✅ Готово", callback_data="profile_done")]
     ])
 
 def task_category_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💼 Работа", callback_data="cat_work"), InlineKeyboardButton(text="🏠 Личное", callback_data="cat_personal"), InlineKeyboardButton(text="🛒 Покупки", callback_data="cat_shopping")],
-        [InlineKeyboardButton(text="🔧 Другое", callback_data="cat_general")]
+        [InlineKeyboardButton(text="👨‍👩‍👧‍👦 Семейное", callback_data="cat_family"), InlineKeyboardButton(text="🔧 Другое", callback_data="cat_general")]
     ])
 
 def task_priority_keyboard():
@@ -703,6 +1032,11 @@ def task_recurrence_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Ежедневно", callback_data="rec_daily"), InlineKeyboardButton(text="📅 Еженедельно", callback_data="rec_weekly"), InlineKeyboardButton(text="🗓 Ежемесячно", callback_data="rec_monthly")],
         [InlineKeyboardButton(text="❌ Без повтора", callback_data="rec_none")]
+    ])
+
+def task_visibility_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔒 Личная", callback_data="vis_private"), InlineKeyboardButton(text="👨‍👩‍👧‍👦 Семейная", callback_data="vis_family")]
     ])
 
 def note_category_keyboard():
@@ -718,11 +1052,12 @@ def note_template_keyboard():
         [InlineKeyboardButton(text="❌ Без шаблона", callback_data="note_tpl_none")]
     ])
 
-def task_actions_keyboard(task_id, has_subtasks=False, has_checklist=False, has_linked_notes=False):
+def task_actions_keyboard(task_id, has_subtasks=False, has_checklist=False, has_linked_notes=False, is_family_task=False):
     buttons = [[InlineKeyboardButton(text="✅ Выполнить", callback_data=f"task_complete_{task_id}")]]
     if has_subtasks: buttons.append([InlineKeyboardButton(text="📝 Подзадачи", callback_data=f"task_subtasks_{task_id}")])
     if has_checklist: buttons.append([InlineKeyboardButton(text="📋 Чек-лист", callback_data=f"task_checklist_{task_id}")])
     if has_linked_notes: buttons.append([InlineKeyboardButton(text="📎 Заметки", callback_data=f"task_notes_{task_id}")])
+    if is_family_task: buttons.append([InlineKeyboardButton(text="👥 Назначить", callback_data=f"task_assign_{task_id}")])
     buttons.append([InlineKeyboardButton(text="🗑 Удалить", callback_data=f"task_delete_{task_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -734,118 +1069,149 @@ def note_actions_keyboard(note_id, has_children=False):
 def external_link_keyboard(link: str, label: str = "Открыть"):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"🔗 {label}", url=link)]])
 
-def dashboard_keyboard():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Обновить", callback_data="dashboard_refresh")],
-        [InlineKeyboardButton(text="📋 Задачи", callback_data="tasks_list"), InlineKeyboardButton(text="📅 Календарь", callback_data="calendar_list")]
-    ])
+def dashboard_keyboard(view_mode: str = "personal"):
+    buttons = [[InlineKeyboardButton(text="🔄 Обновить", callback_data="dashboard_refresh")]]
+    if view_mode == "personal":
+        buttons.append([InlineKeyboardButton(text="👨‍👩‍👧‍👦 Семейный вид", callback_data="dashboard_family")])
+    else:
+        buttons.append([InlineKeyboardButton(text="👤 Личный вид", callback_data="dashboard_personal")])
+    buttons.append([InlineKeyboardButton(text="📋 Задачи", callback_data="tasks_list"), InlineKeyboardButton(text="📅 Календарь", callback_data="calendar_list")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 class TaskFSM(StatesGroup):
     title = State(); description = State(); priority = State(); due_date = State()
-    category = State(); tags = State(); recurrence = State(); attachments = State(); linked_notes = State()
+    category = State(); tags = State(); recurrence = State(); attachments = State(); linked_notes = State(); visibility = State(); assign = State()
 class NoteFSM(StatesGroup): template = State(); category = State(); content = State(); tags = State(); parent = State()
-class CalendarFSM(StatesGroup): title=State(); description=State(); event_date=State(); recurrence=State()
+class CalendarFSM(StatesGroup): title=State(); description=State(); event_date=State(); recurrence=State(); visibility=State()
 class ProfileEditFSM(StatesGroup): field=State(); value=State()
+class FamilyFSM(StatesGroup): action=State(); target=State()
 
 # ======================
-#  🔥 AI: ОБЩИЙ ЧАТ
+#  🔥 AI: ОБЩИЙ ЧАТ (АДАПТИВНЫЙ)
 # ======================
-async def call_openai_chat(user_text: str, profile: dict = None, mood: str = "нейтральное", memory: list = None):
-    if not OPENROUTER_API_KEY: return await call_qwen_fallback(user_text, profile, mood, memory)
-    user_name = profile.get("name") if profile else ""
-    city = profile.get("city", CITY_DEFAULT) if profile else CITY_DEFAULT
+async def call_openai_chat(user_text: str, profile_ctx: dict, mood: str = "нейтральное", memory: list = None):
+    if not OPENROUTER_API_KEY: return await call_qwen_fallback(user_text, profile_ctx, mood, memory)
+    
+    user_name = profile_ctx.get("name") or "пользователь"
+    city = profile_ctx.get("city", CITY_DEFAULT)
     is_short = any(k in user_text.lower() for k in ["шутк", "анекдот", "прикол", "факт", "коротко", "в двух словах"])
-    system_prompt = f"""Ты — AssistEmpat, личный помощник {user_name or 'пользователя'}. Город: {city}.
-ВОЗМОЖНОСТИ: задачи (с заметками), заметки (дерево), календарь, погода, кино, новости, дашборд.
-ПРАВИЛА: 1. Если "привет"/"новая тема"/"забудь" — начинай заново. 2. Развёрнуто (3-5 предл.), но кратко если просят шутку/факт. 3. Дружелюбно, эмодзи умеренно. 4. Не навязывай помощь с "проблемами" при болтовне. Настроение: {mood}"""
+    
+    # Адаптивный system prompt
+    style = get_age_appropriate_style(profile_ctx["age_group"], profile_ctx["gender"])
+    
+    system_prompt = f"""Ты — AssistEmpat, личный помощник {user_name}. Город: {city}.
+ВОЗМОЖНОСТИ: задачи (с заметками), заметки (дерево), календарь, погода, кино, новости, дашборд, семейный режим.
+ПРАВИЛА:
+1. Если "привет"/"новая тема"/"забудь" — начинай заново.
+2. Отвечай {'кратко и просто' if style['complexity']=='simple' else 'развёрнуто' } ({'2-3' if style['complexity']=='simple' else '3-5'} предл.), но кратко если просят шутку/факт.
+3. {'Используй эмодзи умеренно' if style['emoji_level']=='low' else 'Добавляй эмодзи для живости' if style['emoji_level']=='high' else 'Используй эмодзи'}.
+4. Не навязывай помощь с "проблемами" при болтовне.
+5. {'Говори просто, как старший друг' if profile_ctx['age_group']=='child' else 'Будь на равных' if profile_ctx['age_group']=='teen' else 'Будь уважителен и конкретен' if profile_ctx['age_group']=='adult' else 'Объясняй пошагово, с заботой'}.
+6. Учитывай предпочтения: {', '.join(style['tone_modifiers'])}.
+Настроение: {mood}"""
+    
     fm, seen = [], set()
     for m in reversed(memory[-5:] if memory else []):
         c = m["content"].strip()
         if c and len(c)>3 and c not in seen: fm.insert(0,m); seen.add(c)
     ctx = "\n".join([f"{m['role']}: {m['content']}" for m in fm])
+    
     try:
         async with httpx.AsyncClient(timeout=15) as cl:
-            r = await cl.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization":f"Bearer {OPENROUTER_API_KEY}","Content-Type":"application/json"}, json={"model":"openai/gpt-4o-mini","messages":[{"role":"system","content":system_prompt},{"role":"user","content":f"{ctx}\n\n{user_text}" if ctx else user_text}], "temperature":0.9 if is_short else 0.7, "max_tokens":150 if is_short else 500})
+            r = await cl.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization":f"Bearer {OPENROUTER_API_KEY}","Content-Type":"application/json"}, json={"model":"openai/gpt-4o-mini","messages":[{"role":"system","content":system_prompt},{"role":"user","content":f"{ctx}\n\n{user_text}" if ctx else user_text}], "temperature":style["temperature"] if not is_short else 0.9, "max_tokens":style["max_tokens"] if not is_short else 150})
             r.raise_for_status()
             ans = r.json()["choices"][0]["message"]["content"].strip()
-            if await is_duplicate_response(profile.get("user_id") if profile else 0, ans): return get_fallback_response(user_text, mood)
-            return ans
+            if await is_duplicate_response(profile_ctx.get("user_id"), ans): return get_fallback_response(user_text, mood, profile_ctx)
+            return format_response_for_user(ans, profile_ctx)
     except Exception as e:
         logging.error(f"OpenAI error: {e}")
-        return await call_qwen_fallback(user_text, profile, mood, memory)
+        return await call_qwen_fallback(user_text, profile_ctx, mood, memory)
 
 # ======================
 #  🔥 AI: РЕЖИМ ЗДОРОВЬЯ
 # ======================
-async def call_health_ai(user_text: str, profile: dict, health_mem: list):
-    if not OPENROUTER_API_KEY: return await call_qwen_fallback(user_text, profile, "нейтральное", health_mem)
-    system_prompt = """Ты — ассистент по здоровому образу жизни.
-ПРАВИЛА: 1. Только ЗОЖ: режим, питание, гидратация, отдых, активность, гигиена, стресс-менеджмент. 2. НИКОГДА не называй препараты/БАДы/дозы. 3. При боли/температуре — рекомендуй врача. 4. Кратко, по делу, поддерживающе. 5. Дисклеймер: "Рекомендации не заменяют консультацию специалиста." Настроение учитывай, фокус на пользе."""
+async def call_health_ai(user_text: str, profile_ctx: dict, health_mem: list):
+    if not OPENROUTER_API_KEY: return await call_qwen_fallback(user_text, profile_ctx, "нейтральное", health_mem)
+    
+    style = get_age_appropriate_style(profile_ctx["age_group"], profile_ctx["gender"])
+    
+    system_prompt = f"""Ты — ассистент по здоровому образу жизни для {'ребёнка' if profile_ctx['age_group']=='child' else 'подростка' if profile_ctx['age_group']=='teen' else 'взрослого' if profile_ctx['age_group']=='adult' else 'пожилого человека'}.
+ПРАВИЛА: 1. Только ЗОЖ: режим, питание, гидратация, отдых, активность, гигиена, стресс-менеджмент. 2. НИКОГДА не называй препараты/БАДы/дозы. 3. При боли/температуре — рекомендуй врача. 4. {'Объясняй просто, с примерами' if profile_ctx['age_group']=='child' else 'Говори на равных' if profile_ctx['age_group']=='teen' else 'Будь конкретен' if profile_ctx['age_group']=='adult' else 'Объясняй пошагово, с заботой'}. 5. Дисклеймер: "Рекомендации не заменяют консультацию специалиста." Настроение учитывай, фокус на пользе."""
+    
     ctx = "\n".join([f"{m['role']}: {m['content']}" for m in health_mem[-4:]])
     try:
         async with httpx.AsyncClient(timeout=15) as cl:
-            r = await cl.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization":f"Bearer {OPENROUTER_API_KEY}","Content-Type":"application/json"}, json={"model":"openai/gpt-4o-mini","messages":[{"role":"system","content":system_prompt},{"role":"user","content":f"{ctx}\n\n{user_text}" if ctx else user_text}], "temperature":0.5, "max_tokens":400})
+            r = await cl.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization":f"Bearer {OPENROUTER_API_KEY}","Content-Type":"application/json"}, json={"model":"openai/gpt-4o-mini","messages":[{"role":"system","content":system_prompt},{"role":"user","content":f"{ctx}\n\n{user_text}" if ctx else user_text}], "temperature":0.5, "max_tokens":style["max_tokens"]})
             r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"].strip()
+            return format_response_for_user(r.json()["choices"][0]["message"]["content"].strip(), profile_ctx)
     except:
         return "🩺 Я не могу дать медицинский совет. Рекомендую обратиться к врачу."
 
 # ======================
 #  🔥 AI: РЕЖИМ ПСИХОАНАЛИЗА (АДАПТИВНЫЙ ТОН)
 # ======================
-def detect_psycho_style(text: str, mood: str) -> tuple[str, float]:
+def detect_psycho_style(text: str, mood: str, age_group: str) -> tuple[str, float]:
     t = text.lower()
     if any(k in t for k in ["пинка", "встряхни", "достал себя жалеть", "хватит ныть", "что делать", "застрял", "не могу решиться", "дай совет", "как быть"]):
-        return "tough", 0.4
+        return "tough", 0.4 if age_group != "child" else 0.6  # детям мягче
     if mood == "радость" or any(k in t for k in ["посмеяться", "ирония", "сарказм", "по-доброму", "подколи", "шутк"]):
-        return "sarcastic", 0.95
+        return "sarcastic", 0.95 if age_group in ["teen", "adult"] else 0.7
     if mood in ["грусть", "тревога", "усталость"]:
         return "empathetic", 0.6
     return "analytical", 0.75
 
-async def call_psycho_ai(user_text: str, profile: dict, psycho_mem: list, mood: str):
-    if not OPENROUTER_API_KEY: return await call_qwen_fallback(user_text, profile, mood, psycho_mem)
-    style, temperature = detect_psycho_style(user_text, mood)
+async def call_psycho_ai(user_text: str, profile_ctx: dict, psycho_mem: list, mood: str):
+    if not OPENROUTER_API_KEY: return await call_qwen_fallback(user_text, profile_ctx, mood, psycho_mem)
+    
+    style_name, temperature = detect_psycho_style(user_text, mood, profile_ctx["age_group"])
+    style = get_age_appropriate_style(profile_ctx["age_group"], profile_ctx["gender"])
+    
     style_prompts = {
-        "empathetic": f"""Ты — эмпатичный психоаналитик. Твоя задача — выслушать, отразить чувства, помочь пользователю разобраться в себе.
-ПРАВИЛА: 1. Начинай с отражения эмоций ("Я слышу, что ты чувствуешь..."). 2. Задавай мягкие уточняющие вопросы. 3. Не давай готовых решений — помогай найти свои. 4. Будь тёплым, человечным, без клише. 5. Дисклеймер в конце сеанса: "Я не заменяю профессионального психолога." Настроение: {mood}""",
-        "analytical": f"""Ты — аналитичный психоаналитик. Твоя задача — помочь пользователю структурировать мысли и увидеть ситуацию под разными углами.
+        "empathetic": f"""Ты — эмпатичный психоаналитик для {'ребёнка' if profile_ctx['age_group']=='child' else 'подростка' if profile_ctx['age_group']=='teen' else 'взрослого'}. Твоя задача — выслушать, отразить чувства, помочь разобраться в себе.
+ПРАВИЛА: 1. Начинай с отражения эмоций ("Я слышу, что ты чувствуешь..."). 2. Задавай {'простые' if profile_ctx['age_group']=='child' else 'мягкие'} уточняющие вопросы. 3. Не давай готовых решений — помогай найти свои. 4. {'Используй простые слова, эмодзи, хвали' if profile_ctx['age_group']=='child' else 'Будь тёплым, человечным, без клише'}. 5. Дисклеймер в конце сеанса: "Я не заменяю профессионального психолога." Настроение: {mood}""",
+        
+        "analytical": f"""Ты — аналитичный психоаналитик для {'подростка' if profile_ctx['age_group']=='teen' else 'взрослого'}. Твоя задача — помочь структурировать мысли и увидеть ситуацию под разными углами.
 ПРАВИЛА: 1. Разложи ситуацию на факты/чувства/возможности. 2. Задавай логичные уточняющие вопросы. 3. Предлагай варианты, но не навязывай. 4. Будь объективным, но поддерживающим. 5. Дисклеймер: "Я не заменяю профессионального психолога." Настроение: {mood}""",
-        "tough": f"""Ты — прямой психоаналитик "жёсткой любви". Твоя задача — помочь пользователю выйти из застоя, взяв ответственность.
+        
+        "tough": f"""Ты — прямой психоаналитик "жёсткой любви" для {'подростка' if profile_ctx['age_group']=='teen' else 'взрослого'}. Твоя задача — помочь выйти из застоя, взяв ответственность.
 ПРАВИЛА: 1. Говори чётко, без воды. 2. Задавай прямые вопросы о действиях СЕГОДНЯ. 3. Не позволяй уходить в самокопание без вывода. 4. Поддерживай, но требуй конкретики. 5. Дисклеймер: "Я не заменяю профессионального психолога." Настроение: {mood}""",
-        "sarcastic": f"""Ты — психоаналитик с лёгкой иронией. Твоя задача — помочь пользователю увидеть ситуацию с юмором и снять напряжение.
+        
+        "sarcastic": f"""Ты — психоаналитик с лёгкой иронией для {'подростка' if profile_ctx['age_group']=='teen' else 'взрослого'}. Твоя задача — помочь увидеть ситуацию с юмором и снять напряжение.
 ПРАВИЛА: 1. Используй добрый сарказм, не обижая. 2. Помогай увидеть абсурдность застоя через юмор. 3. После иронии — мягкий переход к действиям. 4. Следи, чтобы пользователь был в ресурсе для такого тона. 5. Дисклеймер: "Я не заменяю профессионального психолога." Настроение: {mood}"""
     }
-    system_prompt = style_prompts.get(style, style_prompts["analytical"])
+    
+    system_prompt = style_prompts.get(style_name, style_prompts["analytical"])
     ctx = "\n".join([f"{m['role']}: {m['content']}" for m in psycho_mem[-6:]])
+    
     try:
         async with httpx.AsyncClient(timeout=20) as cl:
-            r = await cl.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}, json={"model":"openai/gpt-4o-mini","messages":[{"role":"system","content":system_prompt},{"role":"user","content":f"{ctx}\n\n{user_text}" if ctx else user_text}],"temperature":temperature,"max_tokens":1500})
+            r = await cl.post("https://openrouter.ai/api/v1/chat/completions", headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}, json={"model":"openai/gpt-4o-mini","messages":[{"role":"system","content":system_prompt},{"role":"user","content":f"{ctx}\n\n{user_text}" if ctx else user_text}],"temperature":temperature,"max_tokens":style["max_tokens"]})
             r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"].strip()
+            return format_response_for_user(r.json()["choices"][0]["message"]["content"].strip(), profile_ctx)
     except:
         return "🧠 Я здесь, чтобы выслушать. Расскажи, что у тебя на душе?"
 
 # ======================
 #  🔥 FALLBACKS
 # ======================
-def get_fallback_response(user_text: str, mood: str) -> str:
-    if mood == "грусть": return "Понимаю. Расскажи, что случилось? 🤍"
-    if mood == "тревога": return "Всё будет хорошо. Что беспокоит?"
-    if mood == "усталость": return "Отдохни. Я тут, если что. 🫂"
-    return "Понял. 👍"
+def get_fallback_response(user_text: str, mood: str, profile_ctx: dict) -> str:
+    style = get_age_appropriate_style(profile_ctx["age_group"], profile_ctx["gender"])
+    if mood == "грусть": return format_response_for_user("Понимаю. Расскажи, что случилось? 🤍", profile_ctx)
+    if mood == "тревога": return format_response_for_user("Всё будет хорошо. Что беспокоит?", profile_ctx)
+    if mood == "усталость": return format_response_for_user("Отдохни. Я тут, если что. 🫂", profile_ctx)
+    return format_response_for_user("Понял. 👍", profile_ctx)
 
-async def call_qwen_fallback(user_text, profile, mood, memory):
-    if not QWEN_API_KEY: return get_fallback_response(user_text, mood)
-    user_name = profile.get("name") if profile else ""
-    sys = f"Ты — {user_name or 'помощник'}. Отвечай кратко."
+async def call_qwen_fallback(user_text, profile_ctx, mood, memory):
+    if not QWEN_API_KEY: return get_fallback_response(user_text, mood, profile_ctx)
+    user_name = profile_ctx.get("name") or "помощник"
+    sys = f"Ты — {user_name}. Отвечай {'кратко и просто' if profile_ctx['age_group']=='child' else 'кратко'}."
     ctx = "\n".join([f"{m['role']}: {m['content']}" for m in (memory or [])[-2:]])
     try:
         async with httpx.AsyncClient(timeout=10) as cl:
             r = await cl.post("https://dashscope-intl.aliyuncs.com/api/v1/services/aigc/text-generation/generation", headers={"Authorization":f"Bearer {QWEN_API_KEY}"}, json={"model":"qwen-max","messages":[{"role":"system","content":sys},{"role":"user","content":f"{ctx}\n\n{user_text}" if ctx else user_text}],"temperature":0.7})
             r.raise_for_status()
-            return r.json()["output"]["text"].strip()
-    except: return get_fallback_response(user_text, mood)
+            return format_response_for_user(r.json()["output"]["text"].strip(), profile_ctx)
+    except: return get_fallback_response(user_text, mood, profile_ctx)
 
 # ======================
 #  ВСПОМОГАТЕЛЬНЫЕ
@@ -900,7 +1266,8 @@ RU_COMMANDS = {
     "привычк":"habits_list", "погод":"ext_weather", "курс":"ext_currency", "здоровье":"ext_health",
     "психо":"ext_psycho", "кино":"ext_cinema", "новост":"ext_news", "профиль":"profile_show", "мой профиль":"profile_show",
     "помощь":"help_show", "дашборд":"dashboard_show", "сброс":"reset_context", "reset":"reset_context", "забудь":"reset_context",
-    "очисти память":"reset_context", "новая тема":"reset_context", "дерево":"notes_tree"
+    "очисти память":"reset_context", "новая тема":"reset_context", "дерево":"notes_tree",
+    "семья":"family_view", "семейный":"family_view", "пригласить":"family_invite"
 }
 def parse_ru_command(text:str) -> str|None:
     text_lower = text.lower().strip()
@@ -917,7 +1284,8 @@ async def cmd_start(msg:Message, state:FSMContext):
     await clear_user_context(msg.from_user.id)
     profile = await get_profile(msg.from_user.id)
     name = profile["name"] if profile and profile["name"] else ""
-    await msg.answer(f"Привет, {name}." if name else "Привет. Как тебя зовут?", reply_markup=main_menu_keyboard())
+    family = await get_user_family(msg.from_user.id)
+    await msg.answer(f"Привет, {name}." if name else "Привет. Как тебя зовут?", reply_markup=main_menu_keyboard(bool(family)))
 
 @dp.message(Command("reset", "clear"))
 async def cmd_reset(msg:Message):
@@ -927,12 +1295,13 @@ async def cmd_reset(msg:Message):
 @dp.message(Command("help"))
 async def cmd_help(msg:Message):
     await msg.answer("""📋 **Команды:**
-📊 /dashboard — сводка дня
+📊 /dashboard — сводка дня | /dashboard family — семейный вид
 📝 /note — заметки | /note_tree — дерево заметок
 📅 /event — события
-📋 /task — задачи (можно привязывать заметки)
+📋 /task — задачи (можно привязывать заметки, делать семейными)
 🔁 /habit — привычки | /habit_stats — статистика
 🔄 /reset — сбросить контекст
+👨‍👩‍👧‍👦 /family — управление семьёй | /switch [ник] — сменить профиль
 ⏰ "напомни [что] [когда]"
 🌤 /weather, 💱 /currency, 🩺 /health, 🧠 /psycho, 🎬 /cinema, 📰 /news
 👤 /profile — мой профиль
@@ -942,7 +1311,9 @@ async def cmd_help(msg:Message):
 async def cmd_profile(msg:Message, state:FSMContext):
     p = await get_profile(msg.from_user.id)
     if not p: await msg.answer("Нет данных. Напиши: 'меня зовут...', 'город: СПб'"); return
-    text = f"👤 **Профиль**\nИмя: {p['name'] or '—'}\nГород: {p['city'] or CITY_DEFAULT} 🌍\nСтиль: {p.get('preferred_tone','balanced')}\n\n✏️ /profile edit"
+    family = await get_user_family(msg.from_user.id)
+    family_info = f"\n👨‍👩‍👧‍👦 Семья: {family['group_name']} ({family['role']})" if family else ""
+    text = f"👤 **Профиль**\nИмя: {p['name'] or '—'}\nВозраст: {p['age'] or '—'} ({p.get('age_group','adult')})\nГород: {p['city'] or CITY_DEFAULT} 🌍\nСтиль: {p.get('preferred_tone','balanced')}{family_info}\n\n✏️ /profile edit"
     await msg.answer(text, parse_mode="Markdown", reply_markup=profile_edit_keyboard())
 
 @dp.message(Command("profile", "edit"))
@@ -962,23 +1333,58 @@ async def cmd_news(msg:Message):
     else: await msg.answer("📰 Новости:", reply_markup=external_link_keyboard(get_news_link(), "Яндекс.Новости"))
 
 # ======================
+#  🔥 СЕМЕЙНЫЙ РЕЖИМ
+# ======================
+@dp.message(Command("family"))
+async def cmd_family(msg:Message):
+    family = await get_user_family(msg.from_user.id)
+    if not family:
+        await msg.answer("👨‍👩‍👧‍👦 **Создать семью**\n\nНапиши: 'создать семью: [название]'\nИли нажми кнопку 👇", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="➕ Создать семью", callback_data="family_create")]]))
+        return
+    members = await get_family_members(family["group_id"])
+    text = f"👨‍👩‍👧‍👦 **{family['group_name']}**\nТвоя роль: {family['role']}\n\nУчастники:\n" + "\n".join([f"• {m['nickname'] or m['name']} ({m['role']})" for m in members])
+    await msg.answer(text, reply_markup=family_keyboard())
+
+@dp.message(Command("switch"))
+async def cmd_switch(msg:Message):
+    # Заглушка для переключения профиля в семье
+    await msg.answer("🔄 Переключение профиля: в разработке")
+
+# ======================
 #  🔥 ДАШБОРД
 # ======================
 @dp.message(Command("dashboard"))
 async def cmd_dashboard(msg:Message):
-    profile = await get_profile(msg.from_user.id)
-    data = await get_dashboard_data(msg.from_user.id, profile)
-    await msg.answer(format_dashboard(data), parse_mode="Markdown", reply_markup=dashboard_keyboard())
+    profile_ctx = await get_user_profile_context(msg.from_user.id)
+    view_mode = "family" if "family" in msg.text.lower() else "personal"
+    data = await get_dashboard_data(msg.from_user.id, profile_ctx, view_mode)
+    await msg.answer(format_dashboard(data), parse_mode="Markdown", reply_markup=dashboard_keyboard(view_mode))
 
 @dp.callback_query(F.data=="dashboard_show")
 async def cb_dashboard(call:CallbackQuery):
-    profile = await get_profile(call.from_user.id)
-    data = await get_dashboard_data(call.from_user.id, profile)
-    await call.message.edit_text(format_dashboard(data), parse_mode="Markdown", reply_markup=dashboard_keyboard())
+    profile_ctx = await get_user_profile_context(call.from_user.id)
+    family = await get_user_family(call.from_user.id)
+    view_mode = "family" if family else "personal"
+    data = await get_dashboard_data(call.from_user.id, profile_ctx, view_mode)
+    await call.message.edit_text(format_dashboard(data), parse_mode="Markdown", reply_markup=dashboard_keyboard(view_mode))
     await call.answer()
 
 @dp.callback_query(F.data=="dashboard_refresh")
 async def cb_dashboard_refresh(call:CallbackQuery): await cb_dashboard(call)
+
+@dp.callback_query(F.data=="dashboard_family")
+async def cb_dashboard_family(call:CallbackQuery):
+    profile_ctx = await get_user_profile_context(call.from_user.id)
+    data = await get_dashboard_data(call.from_user.id, profile_ctx, "family")
+    await call.message.edit_text(format_dashboard(data), parse_mode="Markdown", reply_markup=dashboard_keyboard("family"))
+    await call.answer()
+
+@dp.callback_query(F.data=="dashboard_personal")
+async def cb_dashboard_personal(call:CallbackQuery):
+    profile_ctx = await get_user_profile_context(call.from_user.id)
+    data = await get_dashboard_data(call.from_user.id, profile_ctx, "personal")
+    await call.message.edit_text(format_dashboard(data), parse_mode="Markdown", reply_markup=dashboard_keyboard("personal"))
+    await call.answer()
 
 # ======================
 #  🔥 ПРОФИЛЬ: РЕДАКТИРОВАНИЕ
@@ -988,7 +1394,7 @@ async def profile_edit_cb(call:CallbackQuery, state:FSMContext):
     field = call.data.split("_")[-1]
     await state.update_data(field=field)
     await state.set_state(ProfileEditFSM.value)
-    prompts = {"name": "✏️ Новое имя:", "age": "✏️ Возраст (число):", "gender": "✏️ Пол (муж/жен):", "city": "✏️ Город:"}
+    prompts = {"name": "✏️ Новое имя:", "age": "✏️ Возраст (число):", "gender": "✏️ Пол (муж/жен/другое):", "city": "✏️ Город:", "agegroup": "✏️ Возрастная группа (child/teen/adult/senior):"}
     await call.message.answer(prompts.get(field, "✏️ Введите:"))
     await call.answer()
 
@@ -999,6 +1405,8 @@ async def profile_save_value(msg:Message, state:FSMContext):
     if field == "age":
         try: value = int(value)
         except: await msg.answer("❌ Возраст — число"); return
+    if field == "agegroup" and value not in ["child","teen","adult","senior"]:
+        await msg.answer("❌ Допустимые значения: child, teen, adult, senior"); return
     await save_profile(msg.from_user.id, **{field: value})
     await msg.answer(f"✅ {field}: {value}")
     await state.clear()
@@ -1135,15 +1543,23 @@ async def event_date(msg:Message, state:FSMContext):
     event_date = parse_time(msg.text)
     if not event_date: await msg.answer("❌ Не понял дату"); return
     await state.update_data(event_date=event_date)
+    await state.set_state(CalendarFSM.visibility)
+    await msg.answer("👁️ Видимость:", reply_markup=task_visibility_keyboard())
+
+@dp.callback_query(F.data.startswith("vis_"))
+async def event_visibility_cb(call:CallbackQuery, state:FSMContext):
+    visibility = call.data.split("_")[1]
+    await state.update_data(visibility=visibility)
     await state.set_state(CalendarFSM.recurrence)
-    await msg.answer("🔄 Повтор:", reply_markup=task_recurrence_keyboard())
+    await call.message.answer("🔄 Повтор:", reply_markup=task_recurrence_keyboard())
+    await call.answer()
 
 @dp.callback_query(F.data.startswith("rec_"))
 async def event_recurrence_cb(call:CallbackQuery, state:FSMContext):
     recurrence = call.data.split("_")[1] if call.data != "rec_none" else None
     await state.update_data(recurrence=recurrence)
     data = await state.get_data()
-    event_id = await create_calendar_event(call.from_user.id, data["title"], data.get("description"), data["event_date"], recurrence=recurrence)
+    event_id = await create_calendar_event(call.from_user.id, data["title"], data.get("description"), data["event_date"], recurrence=recurrence, visibility=data.get("visibility","private"))
     await call.message.answer(f"✅ #{event_id}: {data['title']}\n🗓 {data['event_date'].astimezone(MOSCOW_TZ).strftime('%d.%m %H:%M')}")
     await state.clear()
     await call.answer()
@@ -1156,7 +1572,7 @@ async def cmd_calendar(msg:Message):
     await msg.answer(text, reply_markup=main_menu_keyboard())
 
 # ======================
-#  🔥 ЗАДАЧИ (с привязкой заметок)
+#  🔥 ЗАДАЧИ (с привязкой заметок и семейным доступом)
 # ======================
 @dp.message(Command("task"))
 async def cmd_task_start(msg:Message, state:FSMContext):
@@ -1205,6 +1621,14 @@ async def task_due_date(msg:Message, state:FSMContext):
 async def task_category_cb(call:CallbackQuery, state:FSMContext):
     await state.update_data(category=call.data.split("_")[1])
     await call.message.edit_text("✅ Категория")
+    await state.set_state(TaskFSM.visibility)
+    await call.message.answer("👁️ Видимость:", reply_markup=task_visibility_keyboard())
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("vis_"))
+async def task_visibility_cb(call:CallbackQuery, state:FSMContext):
+    visibility = call.data.split("_")[1]
+    await state.update_data(visibility=visibility)
     await state.set_state(TaskFSM.linked_notes)
     await call.message.answer("📎 Привязать заметки? (через запятую ID или /skip):")
     await call.answer()
@@ -1259,10 +1683,11 @@ async def _finish_task_creation(msg:Message, state:FSMContext, attachments):
         uid=msg.from_user.id, title=data["title"], description=data.get("description"),
         priority=data.get("priority","medium"), due_date=data.get("due_date"), category=data.get("category","general"),
         tags=data.get("tags"), parent_id=None, recurrence=data.get("recurrence"), attachments=attachments,
-        linked_note_ids=data.get("linked_note_ids")
+        linked_note_ids=data.get("linked_note_ids"), visibility=data.get("visibility","private")
     )
     has_linked = bool(data.get("linked_note_ids"))
-    await msg.answer(f"✅ #{task_id}: {data['title']}", reply_markup=task_actions_keyboard(task_id, has_linked_notes=has_linked))
+    is_family = data.get("visibility") == "family"
+    await msg.answer(f"✅ #{task_id}: {data['title']}", reply_markup=task_actions_keyboard(task_id, has_linked_notes=has_linked, is_family_task=is_family))
     await state.clear()
 
 @dp.message(Command("tasks"))
@@ -1272,7 +1697,9 @@ async def cmd_tasks(msg:Message):
     lines = ["📋 **Задачи**:"]
     for t in tasks[:5]:
         due = f" ({t['due_date'].astimezone(MOSCOW_TZ).strftime('%H:%M')})" if t['due_date'] else ""
-        lines.append(f"• {t['title']}{due}")
+        vis = "👥 " if t["visibility"] == "family" else ""
+        assigned = f" 👤 {t['assigned_name']}" if t.get("assigned_name") else ""
+        lines.append(f"• {vis}{t['title']}{due}{assigned}")
         if t.get("linked_notes"):
             for n in t["linked_notes"]:
                 preview = n["content"][:40] + "..." if len(n["content"]) > 40 else n["content"]
@@ -1308,7 +1735,9 @@ async def cb_tasks(call:CallbackQuery):
         lines = ["📋 Задачи:"]
         for t in tasks[:5]:
             due = f" ({t['due_date'].astimezone(MOSCOW_TZ).strftime('%H:%M')})" if t['due_date'] else ""
-            lines.append(f"• {t['title']}{due}")
+            vis = "👥 " if t["visibility"] == "family" else ""
+            assigned = f" 👤 {t['assigned_name']}" if t.get("assigned_name") else ""
+            lines.append(f"• {vis}{t['title']}{due}{assigned}")
             if t.get("linked_notes"):
                 for n in t["linked_notes"]:
                     preview = n["content"][:30] + "..." if len(n["content"]) > 30 else n["content"]
@@ -1334,7 +1763,6 @@ async def cb_task_subtasks(call:CallbackQuery):
 @dp.callback_query(F.data.startswith("task_notes_"))
 async def cb_task_notes(call:CallbackQuery):
     task_id = int(call.data.split("_")[-1])
-    task = await conn.fetchrow("SELECT linked_note_ids FROM tasks WHERE id=$1", task_id) if 'conn' in locals() else None
     # Упрощённо: покажем заглушку
     await call.message.answer("📎 Привязанные заметки:\n(функционал в разработке)")
 
@@ -1378,7 +1806,8 @@ async def cb_calendar(call:CallbackQuery):
     else:
         lines = ["📅 События:"]
         for e in events[:5]:
-            lines.append(f"• {e['event_date'].astimezone(MOSCOW_TZ).strftime('%d.%m %H:%M')} — {e['title']}")
+            vis = "👥 " if e["visibility"] == "family" else ""
+            lines.append(f"• {vis}{e['event_date'].astimezone(MOSCOW_TZ).strftime('%d.%m %H:%M')} — {e['title']}")
         await call.message.edit_text("\n".join(lines), reply_markup=main_menu_keyboard())
     await call.answer()
 
@@ -1401,7 +1830,9 @@ async def cb_reminders(call:CallbackQuery):
 @dp.callback_query(F.data=="profile_show")
 async def cb_profile(call:CallbackQuery):
     p = await get_profile(call.from_user.id)
-    await call.answer(f"👤 {p['name'] or '—'} • {p['city'] or CITY_DEFAULT}", show_alert=True)
+    family = await get_user_family(call.from_user.id)
+    family_info = f" • {family['group_name']}" if family else ""
+    await call.answer(f"👤 {p['name'] or '—'} • {p['city'] or CITY_DEFAULT}{family_info}", show_alert=True)
 
 @dp.callback_query(F.data=="help_show")
 async def cb_help(call:CallbackQuery): await call.answer("/help — список команд", show_alert=True)
@@ -1425,12 +1856,50 @@ async def cb_note_children(call:CallbackQuery):
         await call.message.answer("\n".join(lines))
 
 # ======================
+#  🔥 СЕМЕЙНЫЕ CALLBACKS
+# ======================
+@dp.callback_query(F.data=="family_view")
+async def cb_family_view(call:CallbackQuery):
+    family = await get_user_family(call.from_user.id)
+    if not family:
+        await call.answer("❌ Сначала создай или вступи в семью", show_alert=True)
+        return
+    await call.message.answer(f"👨‍👩‍👧‍👦 **{family['group_name']}**\nТвоя роль: {family['role']}", reply_markup=family_keyboard())
+    await call.answer()
+
+@dp.callback_query(F.data=="family_create")
+async def cb_family_create(call:CallbackQuery):
+    await call.message.answer("👨‍👩‍👧‍👦 **Название семьи**: (напиши название)")
+    await call.answer()
+
+@dp.callback_query(F.data=="family_members")
+async def cb_family_members(call:CallbackQuery):
+    family = await get_user_family(call.from_user.id)
+    if not family:
+        await call.answer("❌ Ты не в семье", show_alert=True)
+        return
+    members = await get_family_members(family["group_id"])
+    text = "👥 **Участники**:\n" + "\n".join([f"• {m['nickname'] or m['name']} ({m['role']})" for m in members])
+    await call.message.answer(text)
+    await call.answer()
+
+@dp.callback_query(F.data=="family_invite")
+async def cb_family_invite(call:CallbackQuery):
+    await call.message.answer("➕ **Пригласить участника**\n\nНапиши: 'пригласить: @username, [роль], [никнейм]'\nПример: пригласить: @anna, member, Анна")
+    await call.answer()
+
+@dp.callback_query(F.data=="family_personal")
+async def cb_family_personal(call:CallbackQuery):
+    await call.message.answer("🔄 Переключено на личный режим")
+    await call.answer()
+
+# ======================
 #  🔥 ВНЕШНИЕ ДАННЫЕ: CALLBACKS
 # ======================
 @dp.callback_query(F.data=="ext_weather")
 async def cb_ext_weather(call:CallbackQuery):
-    profile = await get_profile(call.from_user.id)
-    city = profile.get("city") if profile and profile.get("city") else CITY_DEFAULT
+    profile_ctx = await get_user_profile_context(call.from_user.id)
+    city = profile_ctx.get("city") or CITY_DEFAULT
     weather = await get_weather_data(city)
     if weather: await call.message.answer(f"🌤 {city}: {weather['temp']}°, {weather['description']}")
     else: await call.message.answer(f"🌤 {city}:", reply_markup=external_link_keyboard(get_weather_link(city), "Яндекс.Погода"))
@@ -1438,20 +1907,22 @@ async def cb_ext_weather(call:CallbackQuery):
 
 @dp.callback_query(F.data=="ext_health")
 async def cb_ext_health(call:CallbackQuery):
+    profile_ctx = await get_user_profile_context(call.from_user.id)
     await set_user_mode(call.from_user.id, "health", "[]")
     await call.message.answer("🩺 **Режим здоровья активирован**\n\nЯ помогу с рекомендациями по ЗОЖ, сну, питанию и отдыху.\n⚠️ Я не врач и не назначаю препараты. Опиши, что беспокоит или что хочешь улучшить?")
     await call.answer()
 
 @dp.callback_query(F.data=="ext_psycho")
 async def cb_ext_psycho(call:CallbackQuery):
+    profile_ctx = await get_user_profile_context(call.from_user.id)
     await set_user_mode(call.from_user.id, "psycho", "", "[]")
     await call.message.answer("🧠 **Режим психоанализа активирован**\n\nРасскажи, что у тебя на душе? Я здесь, чтобы выслушать и помочь разобраться. 🤍\n⚠️ Я не заменяю профессионального психолога. При острых состояниях обращайся к специалисту.")
     await call.answer()
 
 @dp.callback_query(F.data=="ext_cinema")
 async def cb_ext_cinema(call:CallbackQuery):
-    profile = await get_profile(call.from_user.id)
-    city = profile.get("city") if profile and profile.get("city") else CITY_DEFAULT
+    profile_ctx = await get_user_profile_context(call.from_user.id)
+    city = profile_ctx.get("city") or CITY_DEFAULT
     movies = await get_cinema_data(city)
     if movies:
         text = "🎬 В прокате:\n" + "\n".join([f"• {m['title']} ⭐{m['rating']:.1f}" for m in movies])
@@ -1467,7 +1938,7 @@ async def cb_ext_news(call:CallbackQuery):
     await call.answer()
 
 # ======================
-#  🔥 🔥  ОСНОВНОЙ ЧАТ (v4.7) 🔥 🔥 
+#  🔥 🔥  ОСНОВНОЙ ЧАТ (v4.8) 🔥 🔥 
 # ======================
 @dp.message()
 async def chat(msg:Message, state:FSMContext):
@@ -1478,23 +1949,24 @@ async def chat(msg:Message, state:FSMContext):
     
     # 🔥 ПРЯМАЯ ПРОВЕРКА НА МЕНЮ (работает в ЛЮБОМ режиме!)
     if "меню" in text_lower or text_lower == "menu":
-        await msg.answer("📋 **Меню**:", reply_markup=main_menu_keyboard())
+        family = await get_user_family(uid)
+        await msg.answer("📋 **Меню**:", reply_markup=main_menu_keyboard(bool(family)))
         return
     
     async with db_pool.acquire() as conn: 
         await conn.execute("INSERT INTO users(user_id,name) VALUES ($1,$2) ON CONFLICT DO NOTHING", uid, msg.from_user.first_name)
     await update_last_activity(uid)
     
-    profile = await get_profile(uid)
-    if not profile or not profile["name"]:
+    profile_ctx = await get_user_profile_context(uid)
+    if not profile_ctx.get("name"):
         name,age,gender,city = extract_profile(text)
         if name or city:
-            await save_profile(uid, name=name, city=city)
-            profile = await get_profile(uid)
+            await save_profile(uid, name=name, age=age, gender=gender, city=city)
+            profile_ctx = await get_user_profile_context(uid)
             await msg.answer(f"Запомнил: {name or city}")
             return
     
-    current_mode = profile.get("mode", "general")
+    current_mode = profile_ctx.get("mode", "general")
     
     # 🔥 РЕЖИМ ЗДОРОВЬЯ
     if current_mode == "health":
@@ -1506,7 +1978,7 @@ async def chat(msg:Message, state:FSMContext):
         h_ctx = await get_health_context(uid)
         h_ctx.append({"role": "user", "content": text})
         await save_health_context(uid, h_ctx)
-        answer = await call_health_ai(text, profile, h_ctx)
+        answer = await call_health_ai(text, profile_ctx, h_ctx)
         h_ctx.append({"role": "assistant", "content": answer})
         await save_health_context(uid, h_ctx)
         await msg.answer(answer)
@@ -1518,11 +1990,14 @@ async def chat(msg:Message, state:FSMContext):
             await set_user_mode(uid, "general")
             await save_psycho_context(uid, [])
             await msg.answer("✅ Сеанс завершён. Я всегда на связи. 🤍")
+            # Контекстный бридж: предложить задачи
+            bridge = suggest_mode_bridge("psycho", "tasks", {})
+            if bridge: await msg.answer(bridge)
             return
         p_ctx = await get_psycho_context(uid)
         p_ctx.append({"role": "user", "content": text})
         await save_psycho_context(uid, p_ctx)
-        answer = await call_psycho_ai(text, profile, p_ctx, await get_mood(uid))
+        answer = await call_psycho_ai(text, profile_ctx, p_ctx, await get_mood(uid))
         p_ctx.append({"role": "assistant", "content": answer})
         await save_psycho_context(uid, p_ctx)
         await msg.answer(answer)
@@ -1537,13 +2012,19 @@ async def chat(msg:Message, state:FSMContext):
     await save_memory(uid, "user", text)
     await update_emotion(uid, text)
     
+    # Обновляем паттерны активности
+    await update_activity_pattern(uid, "message", now_moscow())
+    
     cmd = parse_ru_command(text)
     if cmd:
         if cmd == "reset_context":
             await clear_user_context(uid)
             await msg.answer("✅ Контекст очищен! Начинаем с чистого листа. 😊")
             return
-        elif cmd == "show_menu": await msg.answer("📋 **Меню**:", reply_markup=main_menu_keyboard()); return
+        elif cmd == "show_menu":
+            family = await get_user_family(uid)
+            await msg.answer("📋 **Меню**:", reply_markup=main_menu_keyboard(bool(family)))
+            return
         elif cmd == "list_tasks": await cmd_tasks(msg); return
         elif cmd == "notes_list": await cmd_notes(msg); return
         elif cmd == "notes_tree": await cmd_note_tree(msg); return
@@ -1551,7 +2032,7 @@ async def chat(msg:Message, state:FSMContext):
         elif cmd == "habits_list": await cb_habits(msg); return
         elif cmd == "dashboard_show": await cmd_dashboard(msg); return
         elif cmd == "ext_weather":
-            city = profile.get("city") if profile and profile.get("city") else CITY_DEFAULT
+            city = profile_ctx.get("city") or CITY_DEFAULT
             weather = await get_weather_data(city)
             if weather: await msg.answer(f"🌤 {city}: {weather['temp']}°, {weather['description']}")
             else: await msg.answer(f"🌤 {city}:", reply_markup=external_link_keyboard(get_weather_link(city), "Яндекс.Погода"))
@@ -1570,7 +2051,7 @@ async def chat(msg:Message, state:FSMContext):
             await msg.answer("🧠 **Режим психоанализа активирован**\n\nРасскажи, что у тебя на душе? Я здесь, чтобы выслушать и помочь разобраться. 🤍\n⚠️ Я не заменяю профессионального психолога. При острых состояниях обращайся к специалисту.")
             return
         elif cmd == "ext_cinema":
-            city = profile.get("city") if profile and profile.get("city") else CITY_DEFAULT
+            city = profile_ctx.get("city") or CITY_DEFAULT
             movies = await get_cinema_data(city)
             if movies:
                 text_msg = "🎬 В прокате:\n" + "\n".join([f"• {m['title']} ⭐{m['rating']:.1f}" for m in movies])
@@ -1584,6 +2065,7 @@ async def chat(msg:Message, state:FSMContext):
             return
         elif cmd == "profile_show": await cmd_profile(msg, state); return
         elif cmd == "help_show": await cmd_help(msg); return
+        elif cmd == "family_view": await cmd_family(msg); return
     
     # Создание задач/заметок текстом
     if any(kw in text_lower for kw in ["создай задачу", "добавь задачу", "новая задача", "задача:"]):
@@ -1608,7 +2090,7 @@ async def chat(msg:Message, state:FSMContext):
         await msg.answer("📅 Для создания события используй команду /event — так будет надёжнее!")
         return
     
-    answer = await call_openai_chat(text, profile, mood, memory)
+    answer = await call_openai_chat(text, profile_ctx, mood, memory)
     await msg.answer(answer)
 
 # ======================
@@ -1628,8 +2110,8 @@ async def morning_ping():
     async with db_pool.acquire() as conn: users = await conn.fetch("SELECT user_id FROM users")
     for u in users:
         try: 
-            profile = await get_profile(u["user_id"])
-            data = await get_dashboard_data(u["user_id"], profile)
+            profile_ctx = await get_user_profile_context(u["user_id"])
+            data = await get_dashboard_data(u["user_id"], profile_ctx)
             await bot.send_message(u["user_id"], f"☀️ **План на день**\n\n" + format_dashboard(data), parse_mode="Markdown")
         except: pass
 async def evening_report():
@@ -1644,7 +2126,6 @@ async def habit_check():
     async with db_pool.acquire() as conn: habits = await conn.fetch("SELECT id,user_id,name,last_done,frequency,schedule_json FROM habits")
     now = now_moscow().date()
     for h in habits:
-        # Проверка гибкого расписания
         schedule = h.get("schedule_json") or {}
         days_mask = schedule.get("days", list(range(7)) if h["frequency"]=="daily" else [])
         if now.weekday() in days_mask and h["last_done"] and h["last_done"] < now - timedelta(days=1):
@@ -1666,7 +2147,7 @@ async def calendar_reminder_check():
 # ======================
 #  🔥 HEALTH CHECK / ЗАПУСК
 # ======================
-async def health_handler(request): return web.json_response({"status":"ok","bot":"AssistEmpat v4.7"}, headers={"Content-Type":"application/json"})
+async def health_handler(request): return web.json_response({"status":"ok","bot":"AssistEmpat v4.8"}, headers={"Content-Type":"application/json"})
 async def start_health_server():
     app = web.Application()
     app.router.add_get('/health', health_handler)
@@ -1679,7 +2160,7 @@ async def start_health_server():
     return runner
 
 async def main():
-    logging.info(f"🚀 Starting AssistEmpat v4.7 (port={HEALTH_PORT}, TZ=Moscow)")
+    logging.info(f"🚀 Starting AssistEmpat v4.8 (port={HEALTH_PORT}, TZ=Moscow)")
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     def handle_signal(): logging.info("🛑 Signal received"); stop_event.set()
@@ -1701,7 +2182,7 @@ async def main():
     logging.info("✅ Scheduler started (Moscow TZ)")
     await bot.delete_webhook(drop_pending_updates=True)
     if stop_event.is_set(): await cleanup(health_runner); return
-    logging.info("✅ AssistEmpat v4.7 ready — STARTING POLLING")
+    logging.info("✅ AssistEmpat v4.8 ready — STARTING POLLING")
     polling_task = asyncio.create_task(dp.start_polling(bot))
     done, pending = await asyncio.wait([polling_task, asyncio.create_task(stop_event.wait())], return_when=asyncio.FIRST_COMPLETED)
     await cleanup(health_runner)
