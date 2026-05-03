@@ -1,12 +1,12 @@
 # =========================================================
 #  ASSISTEMPAT BOT v4.9 (Family-Safe + Connected Intelligence)
-#  Полностью рабочий код с:
+#  ✅ Полностью рабочий код с:
 #  1. 🔐 Безопасные семьи: инвайт-коды, изоляция данных, роли
 #  2. 🎭 Адаптивные ответы: возраст, пол, тон, сложность
 #  3. 🧠 Связность режимов: психоанализ → задачи → привычки
 #  4. 📊 Дашборд 3.0: личный/семейный вид, инсайты
 #  5. 🌳 Дерево заметок + связь с задачами
-#  6. ✅ Все миграции БД проверены
+#  6. 🏥 Надёжный health-check для Railway
 #  Часовой пояс: Москва (UTC+3)
 # =========================================================
 
@@ -43,7 +43,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 #  🔥 ЧАСОВОЙ ПОЯС: МОСКВА
 # ======================
 MOSCOW_TZ = timezone(timedelta(hours=3))
-def now_moscow() -> datetime: 
+def now_moscow() -> datetime:
     return datetime.now(MOSCOW_TZ)
 
 # ======================
@@ -206,188 +206,173 @@ async def init_db():
         # Основные таблицы
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS users(
-            user_id BIGINT PRIMARY KEY, 
-            name TEXT, 
-            age INTEGER, 
-            gender TEXT, 
+            user_id BIGINT PRIMARY KEY,
+            name TEXT,
+            age INTEGER,
+            gender TEXT,
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
-        
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS memory(
-            id SERIAL PRIMARY KEY, 
-            user_id BIGINT, 
-            role TEXT, 
-            content TEXT, 
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            role TEXT,
+            content TEXT,
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
-        
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS reminders(
-            id SERIAL PRIMARY KEY, 
-            user_id BIGINT, 
-            text TEXT, 
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            text TEXT,
             remind_at TIMESTAMP
         );
         """)
-        
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS habits(
-            id SERIAL PRIMARY KEY, 
-            user_id BIGINT, 
-            name TEXT, 
-            streak INTEGER DEFAULT 0, 
-            last_done DATE, 
-            frequency TEXT DEFAULT 'daily', 
-            target_per_week INTEGER DEFAULT 7, 
-            schedule_json JSONB DEFAULT '{}', 
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            name TEXT,
+            streak INTEGER DEFAULT 0,
+            last_done DATE,
+            frequency TEXT DEFAULT 'daily',
+            target_per_week INTEGER DEFAULT 7,
+            schedule_json JSONB DEFAULT '{}',
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
-        
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS habit_logs(
-            id SERIAL PRIMARY KEY, 
-            habit_id INTEGER REFERENCES habits(id) ON DELETE CASCADE, 
-            completed_at TIMESTAMP DEFAULT NOW(), 
+            id SERIAL PRIMARY KEY,
+            habit_id INTEGER REFERENCES habits(id) ON DELETE CASCADE,
+            completed_at TIMESTAMP DEFAULT NOW(),
             note TEXT
         );
         """)
-        
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS emotions(
-            id SERIAL PRIMARY KEY, 
-            user_id BIGINT, 
-            mood TEXT, 
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            mood TEXT,
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
-        
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS last_activity(
-            user_id BIGINT PRIMARY KEY, 
+            user_id BIGINT PRIMARY KEY,
             last_time TIMESTAMP DEFAULT NOW()
         );
         """)
-        
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS message_tags(
-            id SERIAL PRIMARY KEY, 
-            user_id BIGINT, 
-            message_id BIGINT, 
-            tags TEXT[], 
-            topic TEXT, 
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            message_id BIGINT,
+            tags TEXT[],
+            topic TEXT,
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
-        
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS response_log(
-            id SERIAL PRIMARY KEY, 
-            user_id BIGINT, 
-            content_hash TEXT, 
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            content_hash TEXT,
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
-        
         # 🔥 ЗАМЕТКИ: полная структура с контентом
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS notes(
-            id SERIAL PRIMARY KEY, 
-            user_id BIGINT, 
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
             content TEXT,
-            created_at TIMESTAMP DEFAULT NOW(), 
-            tags TEXT[], 
-            category TEXT DEFAULT 'general', 
+            created_at TIMESTAMP DEFAULT NOW(),
+            tags TEXT[],
+            category TEXT DEFAULT 'general',
             parent_id INTEGER REFERENCES notes(id) ON DELETE CASCADE
         );
         """)
-        
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS calendar_events(
-            id SERIAL PRIMARY KEY, 
-            user_id BIGINT, 
-            title TEXT, 
-            description TEXT, 
-            event_date TIMESTAMP, 
-            reminder_before INTERVAL, 
-            recurrence TEXT, 
-            category TEXT DEFAULT 'general', 
-            created_at TIMESTAMP DEFAULT NOW(), 
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            title TEXT,
+            description TEXT,
+            event_date TIMESTAMP,
+            reminder_before INTERVAL,
+            recurrence TEXT,
+            category TEXT DEFAULT 'general',
+            created_at TIMESTAMP DEFAULT NOW(),
             visibility TEXT DEFAULT 'private'
         );
         """)
-        
         # 🔥 ЗАДАЧИ: с поддержкой связанных заметок и видимости
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS tasks(
-            id SERIAL PRIMARY KEY, 
-            user_id BIGINT, 
-            title TEXT NOT NULL, 
-            description TEXT, 
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            title TEXT NOT NULL,
+            description TEXT,
             status TEXT DEFAULT 'pending',
-            priority TEXT DEFAULT 'medium', 
-            due_date TIMESTAMP, 
-            category TEXT DEFAULT 'general', 
+            priority TEXT DEFAULT 'medium',
+            due_date TIMESTAMP,
+            category TEXT DEFAULT 'general',
             tags TEXT[],
-            parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE, 
-            recurrence TEXT, 
+            parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
+            recurrence TEXT,
             attachments TEXT[],
-            linked_note_ids INTEGER[] DEFAULT '{}', 
-            created_at TIMESTAMP DEFAULT NOW(), 
-            completed_at TIMESTAMP, 
+            linked_note_ids INTEGER[] DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT NOW(),
+            completed_at TIMESTAMP,
             checklist JSONB DEFAULT '[]',
-            visibility TEXT DEFAULT 'private', 
+            visibility TEXT DEFAULT 'private',
             assigned_to BIGINT REFERENCES users(user_id)
         );
         """)
-        
         # 🔥 ПРОФИЛЬ: с поддержкой новых полей
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS profile(
-            user_id BIGINT PRIMARY KEY, 
-            name TEXT, 
-            age INTEGER, 
-            gender TEXT, 
+            user_id BIGINT PRIMARY KEY,
+            name TEXT,
+            age INTEGER,
+            gender TEXT,
             city TEXT DEFAULT 'Москва',
-            last_quote_index INTEGER DEFAULT 0, 
-            last_fact_index INTEGER DEFAULT 0, 
+            last_quote_index INTEGER DEFAULT 0,
+            last_fact_index INTEGER DEFAULT 0,
             mode TEXT DEFAULT 'general',
-            health_context TEXT DEFAULT '', 
-            psycho_context TEXT DEFAULT '', 
-            preferred_tone TEXT DEFAULT 'balanced', 
+            health_context TEXT DEFAULT '',
+            psycho_context TEXT DEFAULT '',
+            preferred_tone TEXT DEFAULT 'balanced',
             last_activity_patterns JSONB DEFAULT '{}',
-            age_group TEXT DEFAULT 'adult', 
+            age_group TEXT DEFAULT 'adult',
             language TEXT DEFAULT 'ru',
-            created_at TIMESTAMP DEFAULT NOW(), 
+            created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         );
         """)
-        
         # 🔥 ДОЛГОСРОЧНАЯ ПАМЯТЬ
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_insights(
-            id SERIAL PRIMARY KEY, 
-            user_id BIGINT, 
-            key TEXT, 
-            value JSONB, 
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            key TEXT,
+            value JSONB,
             updated_at TIMESTAMP DEFAULT NOW(),
             UNIQUE(user_id, key)
         );
         """)
-        
         # 🔥 СЕМЕЙНЫЕ ГРУППЫ
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS family_groups(
-            id SERIAL PRIMARY KEY, 
-            name TEXT, 
-            created_by BIGINT REFERENCES users(user_id), 
+            id SERIAL PRIMARY KEY,
+            name TEXT,
+            created_by BIGINT REFERENCES users(user_id),
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
-        
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS family_members(
             user_id BIGINT PRIMARY KEY REFERENCES users(user_id),
@@ -397,7 +382,6 @@ async def init_db():
             joined_at TIMESTAMP DEFAULT NOW()
         );
         """)
-        
         # 🔥 ИНВАЙТ-КОДЫ ДЛЯ СЕМЕЙ (безопасное присоединение)
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS family_invites(
@@ -409,7 +393,6 @@ async def init_db():
             used BOOLEAN DEFAULT FALSE
         );
         """)
-        
         # 🔥 МИГРАЦИИ (добавляем колонки, если таблица уже существует)
         migrations = [
             # users
@@ -417,18 +400,15 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS age INTEGER",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS gender TEXT",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
-            
             # memory
             "ALTER TABLE memory ADD COLUMN IF NOT EXISTS user_id BIGINT",
             "ALTER TABLE memory ADD COLUMN IF NOT EXISTS role TEXT",
             "ALTER TABLE memory ADD COLUMN IF NOT EXISTS content TEXT",
             "ALTER TABLE memory ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
-            
             # reminders
             "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS user_id BIGINT",
             "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS text TEXT",
             "ALTER TABLE reminders ADD COLUMN IF NOT EXISTS remind_at TIMESTAMP",
-            
             # habits
             "ALTER TABLE habits ADD COLUMN IF NOT EXISTS user_id BIGINT",
             "ALTER TABLE habits ADD COLUMN IF NOT EXISTS name TEXT",
@@ -438,41 +418,34 @@ async def init_db():
             "ALTER TABLE habits ADD COLUMN IF NOT EXISTS target_per_week INTEGER DEFAULT 7",
             "ALTER TABLE habits ADD COLUMN IF NOT EXISTS schedule_json JSONB DEFAULT '{}'",
             "ALTER TABLE habits ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
-            
             # habit_logs
             "ALTER TABLE habit_logs ADD COLUMN IF NOT EXISTS habit_id INTEGER",
             "ALTER TABLE habit_logs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP DEFAULT NOW()",
             "ALTER TABLE habit_logs ADD COLUMN IF NOT EXISTS note TEXT",
-            
             # emotions
             "ALTER TABLE emotions ADD COLUMN IF NOT EXISTS user_id BIGINT",
             "ALTER TABLE emotions ADD COLUMN IF NOT EXISTS mood TEXT",
             "ALTER TABLE emotions ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
-            
             # last_activity
             "ALTER TABLE last_activity ADD COLUMN IF NOT EXISTS user_id BIGINT",
             "ALTER TABLE last_activity ADD COLUMN IF NOT EXISTS last_time TIMESTAMP DEFAULT NOW()",
-            
             # message_tags
             "ALTER TABLE message_tags ADD COLUMN IF NOT EXISTS user_id BIGINT",
             "ALTER TABLE message_tags ADD COLUMN IF NOT EXISTS message_id BIGINT",
             "ALTER TABLE message_tags ADD COLUMN IF NOT EXISTS tags TEXT[]",
             "ALTER TABLE message_tags ADD COLUMN IF NOT EXISTS topic TEXT",
             "ALTER TABLE message_tags ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
-            
             # response_log
             "ALTER TABLE response_log ADD COLUMN IF NOT EXISTS user_id BIGINT",
             "ALTER TABLE response_log ADD COLUMN IF NOT EXISTS content_hash TEXT",
             "ALTER TABLE response_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
-            
-            # notes - 🔥 ВАЖНО: content добавлен в CREATE TABLE, но для миграции:
+            # notes
             "ALTER TABLE notes ADD COLUMN IF NOT EXISTS user_id BIGINT",
             "ALTER TABLE notes ADD COLUMN IF NOT EXISTS content TEXT",
             "ALTER TABLE notes ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
             "ALTER TABLE notes ADD COLUMN IF NOT EXISTS tags TEXT[]",
             "ALTER TABLE notes ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'general'",
             "ALTER TABLE notes ADD COLUMN IF NOT EXISTS parent_id INTEGER",
-            
             # calendar_events
             "ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS user_id BIGINT",
             "ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS title TEXT",
@@ -483,7 +456,6 @@ async def init_db():
             "ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'general'",
             "ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
             "ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS visibility TEXT DEFAULT 'private'",
-            
             # tasks
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS user_id BIGINT",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS title TEXT NOT NULL",
@@ -502,7 +474,6 @@ async def init_db():
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS checklist JSONB DEFAULT '[]'",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS visibility TEXT DEFAULT 'private'",
             "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS assigned_to BIGINT",
-            
             # profile
             "ALTER TABLE profile ADD COLUMN IF NOT EXISTS name TEXT",
             "ALTER TABLE profile ADD COLUMN IF NOT EXISTS age INTEGER",
@@ -519,25 +490,21 @@ async def init_db():
             "ALTER TABLE profile ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'ru'",
             "ALTER TABLE profile ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
             "ALTER TABLE profile ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()",
-            
             # user_insights
             "ALTER TABLE user_insights ADD COLUMN IF NOT EXISTS user_id BIGINT",
             "ALTER TABLE user_insights ADD COLUMN IF NOT EXISTS key TEXT",
             "ALTER TABLE user_insights ADD COLUMN IF NOT EXISTS value JSONB",
             "ALTER TABLE user_insights ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()",
-            
             # family_groups
             "ALTER TABLE family_groups ADD COLUMN IF NOT EXISTS name TEXT",
             "ALTER TABLE family_groups ADD COLUMN IF NOT EXISTS created_by BIGINT",
             "ALTER TABLE family_groups ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
-            
             # family_members
             "ALTER TABLE family_members ADD COLUMN IF NOT EXISTS user_id BIGINT",
             "ALTER TABLE family_members ADD COLUMN IF NOT EXISTS group_id INTEGER",
             "ALTER TABLE family_members ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'member'",
             "ALTER TABLE family_members ADD COLUMN IF NOT EXISTS nickname TEXT",
             "ALTER TABLE family_members ADD COLUMN IF NOT EXISTS joined_at TIMESTAMP DEFAULT NOW()",
-            
             # family_invites
             "ALTER TABLE family_invites ADD COLUMN IF NOT EXISTS code TEXT",
             "ALTER TABLE family_invites ADD COLUMN IF NOT EXISTS group_id INTEGER",
@@ -546,13 +513,11 @@ async def init_db():
             "ALTER TABLE family_invites ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP",
             "ALTER TABLE family_invites ADD COLUMN IF NOT EXISTS used BOOLEAN DEFAULT FALSE",
         ]
-        
         for sql in migrations:
             try:
                 await conn.execute(sql)
             except Exception as e:
                 logging.warning(f"⚠️ Migration skipped: {sql[:80]}... — {e}")
-        
         # 🔥 ИНДЕКСЫ для производительности
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_memory_user ON memory(user_id, created_at DESC)",
@@ -578,13 +543,11 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_family_group ON family_members(group_id)",
             "CREATE INDEX IF NOT EXISTS idx_invites_code ON family_invites(code) WHERE used=FALSE AND expires_at > NOW()",
         ]
-        
         for sql in indexes:
             try:
                 await conn.execute(sql)
             except Exception as e:
                 logging.warning(f"⚠️ Index skipped: {sql[:80]}... — {e}")
-    
     logging.info("✅ PostgreSQL initialized + v4.9 features (family-safe + connected)")
 
 # ======================
@@ -603,7 +566,7 @@ async def clear_user_context(uid: int):
 async def set_user_mode(uid: int, mode: str, health_ctx: str = "", psycho_ctx: str = ""):
     async with db_pool.acquire() as conn:
         await conn.execute(
-            "UPDATE profile SET mode=$1, health_context=$2, psycho_context=$3 WHERE user_id=$4", 
+            "UPDATE profile SET mode=$1, health_context=$2, psycho_context=$3 WHERE user_id=$4",
             mode, health_ctx, psycho_ctx, uid
         )
 
@@ -649,7 +612,6 @@ async def get_user_profile_context(uid: int) -> dict:
     profile = await get_profile(uid)
     if not profile:
         return {}
-    
     insights = {}
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT key, value FROM user_insights WHERE user_id=$1", uid)
@@ -658,7 +620,6 @@ async def get_user_profile_context(uid: int) -> dict:
                 insights[r["key"]] = json.loads(r["value"])
             except:
                 insights[r["key"]] = r["value"]
-    
     age = profile.get("age")
     if age and not profile.get("age_group"):
         if age < 12:
@@ -671,7 +632,6 @@ async def get_user_profile_context(uid: int) -> dict:
             age_group = "senior"
     else:
         age_group = profile.get("age_group", "adult")
-    
     return {
         "user_id": uid,
         "name": profile.get("name"),
@@ -693,11 +653,11 @@ def generate_invite_code(length=6) -> str:
 async def create_family_group(name: str, created_by: int) -> int:
     async with db_pool.acquire() as conn:
         group_id = await conn.fetchval(
-            "INSERT INTO family_groups(name, created_by) VALUES ($1, $2) RETURNING id", 
+            "INSERT INTO family_groups(name, created_by) VALUES ($1, $2) RETURNING id",
             name, created_by
         )
         await conn.execute(
-            "INSERT INTO family_members(user_id, group_id, role, nickname) VALUES ($1, $2, 'admin', 'Я')", 
+            "INSERT INTO family_members(user_id, group_id, role, nickname) VALUES ($1, $2, 'admin', 'Я')",
             created_by, group_id
         )
         return group_id
@@ -714,28 +674,20 @@ async def create_family_invite(group_id: int, created_by: int) -> str:
 async def join_family_by_code(uid: int, code: str) -> bool:
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT group_id, expires_at, used FROM family_invites WHERE code=$1", 
+            "SELECT group_id, expires_at, used FROM family_invites WHERE code=$1",
             code
         )
         if not row or row["used"] or row["expires_at"] < now_moscow():
             return False
-        
         group_id = row["group_id"]
-        
-        # Проверяем, не состоит ли уже в семье
         existing = await conn.fetchval("SELECT group_id FROM family_members WHERE user_id=$1", uid)
         if existing:
             return False
-        
-        # Добавляем как участника
         await conn.execute(
             "INSERT INTO family_members(user_id, group_id, role, nickname) VALUES ($1, $2, 'member', $3)",
             uid, group_id, f"User{uid}"
         )
-        
-        # Помечаем код как использованный
         await conn.execute("UPDATE family_invites SET used=TRUE WHERE code=$1", code)
-        
         return True
 
 async def get_user_family(uid: int):
@@ -758,12 +710,9 @@ async def get_family_members(group_id: int):
         """, group_id)
 
 async def get_secure_tasks(uid: int, status="pending", with_linked_notes=False):
-    """Безопасный запрос задач: личные + семейные (только если в одной группе)"""
     async with db_pool.acquire() as conn:
         family = await get_user_family(uid)
-        
         if family:
-            # Личные задачи ИЛИ семейные задачи от членов МОЕЙ группы
             query = """
                 SELECT t.*, u.name as assigned_name
                 FROM tasks t
@@ -772,7 +721,7 @@ async def get_secure_tasks(uid: int, status="pending", with_linked_notes=False):
                 AND (
                     t.user_id = $2
                     OR (
-                        t.visibility = 'family' 
+                        t.visibility = 'family'
                         AND t.user_id IN (
                             SELECT user_id FROM family_members WHERE group_id = $3
                         )
@@ -783,7 +732,6 @@ async def get_secure_tasks(uid: int, status="pending", with_linked_notes=False):
             """
             params = [status, uid, family["group_id"]]
         else:
-            # Только личные задачи
             query = """
                 SELECT t.*, u.name as assigned_name
                 FROM tasks t
@@ -793,9 +741,7 @@ async def get_secure_tasks(uid: int, status="pending", with_linked_notes=False):
                 LIMIT 20
             """
             params = [uid, status]
-        
         tasks = await conn.fetch(query, *params)
-        
         if with_linked_notes and tasks:
             note_ids = [nid for t in tasks for nid in (t["linked_note_ids"] or [])]
             if note_ids:
@@ -803,37 +749,32 @@ async def get_secure_tasks(uid: int, status="pending", with_linked_notes=False):
                 notes_map = {n["id"]: n for n in notes}
                 for t in tasks:
                     t["linked_notes"] = [notes_map[nid] for nid in (t["linked_note_ids"] or []) if nid in notes_map]
-        
         return tasks
 
 async def get_secure_calendar(uid: int, from_date=None, to_date=None):
-    """Безопасный запрос событий: личные + семейные"""
     async with db_pool.acquire() as conn:
         family = await get_user_family(uid)
-        
         if family:
             query = """
                 SELECT * FROM calendar_events
                 WHERE (user_id = $1 AND visibility = 'private')
-                   OR (
-                       visibility = 'family' 
-                       AND user_id IN (
-                           SELECT user_id FROM family_members WHERE group_id = $2
-                       )
-                   )
+                OR (
+                    visibility = 'family'
+                    AND user_id IN (
+                        SELECT user_id FROM family_members WHERE group_id = $2
+                    )
+                )
             """
             params = [uid, family["group_id"]]
         else:
             query = "SELECT * FROM calendar_events WHERE user_id = $1 AND visibility = 'private'"
             params = [uid]
-        
         if from_date:
             query += " AND event_date >= $3"
             params.append(from_date)
         if to_date:
             query += " AND event_date <= $4" if from_date else " AND event_date <= $3"
             params.append(to_date if from_date else to_date)
-        
         query += " ORDER BY event_date ASC LIMIT 20"
         return await conn.fetch(query, *params)
 
@@ -867,27 +808,21 @@ def get_age_appropriate_style(age_group: str, gender: str = None) -> dict:
             "tone_modifiers": ["будь терпеливым", "объясняй пошагово", "избегай сленга", "проявляй заботу"]
         }
     }
-    
     base = styles.get(age_group, styles["adult"])
-    
     if gender == "female" and age_group in ["teen", "adult"]:
         base["tone_modifiers"].append("будь эмпатичным, но не снисходительным")
     elif gender == "male" and age_group in ["teen", "adult"]:
         base["tone_modifiers"].append("будь прямым, но поддерживающим")
-    
     return base
 
 def format_response_for_user(text: str, user_ctx: dict) -> str:
     style = get_age_appropriate_style(user_ctx["age_group"], user_ctx["gender"])
-    
     if style["emoji_level"] != "none":
         text = f"{style['prefix']}{text}{style['suffix']}"
-    
     if user_ctx["age_group"] == "child" and style["gamification"]:
         if random.random() < 0.3:
             encouragements = ["Молодец! 🎉", "Так держать! 🏆", "Ты супер! ⭐", "Горжусь тобой! 💪"]
             text += f"\n\n{random.choice(encouragements)}"
-    
     return text
 
 # ======================
@@ -907,15 +842,11 @@ def suggest_mode_bridge(from_mode: str, to_mode: str, context: dict) -> str | No
 async def update_activity_pattern(uid: int, activity_type: str, timestamp: datetime):
     hour = timestamp.hour
     day_of_week = timestamp.weekday()
-    
     patterns = await get_user_insight(uid, "activity_patterns") or {}
-    
     hour_key = f"hour_{hour}"
     patterns[hour_key] = patterns.get(hour_key, 0) + 1
-    
     day_key = f"day_{day_of_week}"
     patterns[day_key] = patterns.get(day_key, 0) + 1
-    
     await save_user_insight(uid, "activity_patterns", patterns)
 
 # ======================
@@ -1038,7 +969,7 @@ NOTE_TEMPLATES = {
 async def create_note(uid, content, tags=None, category="general", parent_id=None):
     async with db_pool.acquire() as conn:
         return await conn.fetchval(
-            "INSERT INTO notes(user_id, content, tags, category, parent_id) VALUES ($1, $2, $3, $4, $5) RETURNING id", 
+            "INSERT INTO notes(user_id, content, tags, category, parent_id) VALUES ($1, $2, $3, $4, $5) RETURNING id",
             uid, content, tags, category, parent_id
         )
 
@@ -1060,11 +991,10 @@ async def get_notes(uid, limit=10, search=None, category=None, parent_id=None, r
         query += f" ORDER BY created_at DESC LIMIT ${len(params)+1}"
         params.append(limit)
         notes = await conn.fetch(query, *params)
-        
         if recursive and notes:
             for note in notes:
                 children = await conn.fetch(
-                    "SELECT id, content, tags, category, parent_id, created_at FROM notes WHERE user_id=$1 AND parent_id=$2 ORDER BY created_at", 
+                    "SELECT id, content, tags, category, parent_id, created_at FROM notes WHERE user_id=$1 AND parent_id=$2 ORDER BY created_at",
                     uid, note["id"]
                 )
                 note["children"] = children
@@ -1168,7 +1098,6 @@ async def get_dashboard_data(uid: int, profile_ctx: dict, view_mode: str = "pers
     now = now_moscow()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
-    
     weather, tasks, events, habits_prog = await asyncio.gather(
         get_weather_data(city),
         get_secure_tasks(uid, status="pending", with_linked_notes=True),
@@ -1176,7 +1105,6 @@ async def get_dashboard_data(uid: int, profile_ctx: dict, view_mode: str = "pers
         get_habits_progress(uid, period="week"),
         return_exceptions=True
     )
-    
     task_notes = {}
     if tasks and not isinstance(tasks, Exception):
         note_ids = [nid for t in tasks for nid in (t.get("linked_note_ids") or [])]
@@ -1184,12 +1112,10 @@ async def get_dashboard_data(uid: int, profile_ctx: dict, view_mode: str = "pers
             async with db_pool.acquire() as conn:
                 notes = await conn.fetch("SELECT id, content, category FROM notes WHERE id = ANY($1)", note_ids)
                 task_notes = {n["id"]: n for n in notes}
-    
     insights = {}
     if view_mode == "personal":
         insights["mood_trend"] = await get_user_insight(uid, "mood_trend")
         insights["productivity_hours"] = await get_user_insight(uid, "productivity_hours")
-    
     return {
         "weather": weather if not isinstance(weather, Exception) else None,
         "city": city,
@@ -1207,13 +1133,10 @@ async def get_dashboard_data(uid: int, profile_ctx: dict, view_mode: str = "pers
 def format_dashboard(data: dict) -> str:
     user_ctx = data.get("user_ctx", {})
     style = get_age_appropriate_style(user_ctx.get("age_group", "adult"), user_ctx.get("gender"))
-    
     lines = [f"{style['prefix']}📊 **Дашборд** • {data['time']}{style['suffix']}"]
-    
     if data["weather"]:
         w = data["weather"]
         lines.append(f"\n🌤 **{data['city']}**: {w['temp']}°, {w['description']}\n💧 {w['humidity']}%  🌬 {w['wind']} м/с")
-    
     if data["tasks_today"]:
         view_label = " (семейные)" if data.get("view_mode") == "family" else ""
         lines.append(f"\n📋 **Задачи на сегодня**{view_label} ({len(data['tasks_today'])}):")
@@ -1228,24 +1151,20 @@ def format_dashboard(data: dict) -> str:
                     if note:
                         preview = note["content"][:40] + "..." if len(note["content"]) > 40 else note["content"]
                         lines.append(f"   📎 [{note['category']}] {preview}")
-    
     if data["events_12h"]:
         lines.append(f"\n📅 **События**:")
         for e in data["events_12h"][:3]:
             vis = "👥 " if e["visibility"] == "family" else ""
             lines.append(f"• {vis}{e['event_date'].strftime('%H:%M')} — {e['title']}")
-    
     if data["habits_progress"]:
         lines.append(f"\n🔁 **Привычки** (неделя):")
         for h in data["habits_progress"][:3]:
             bar = "█" * (h["percent"]//10) + "░" * (10 - h["percent"]//10)
             lines.append(f"• {h['name']}: [{bar}] {h['completed']}/{h['target']} ({h['percent']}%)")
-    
     if data.get("insights") and data.get("view_mode") == "personal":
         if data["insights"].get("productivity_hours"):
             peak = data["insights"]["productivity_hours"]
             lines.append(f"\n💡 **Инсайт**: Ты наиболее продуктивен в {peak}:00–{peak+2}:00")
-    
     return "\n".join(lines)
 
 # ======================
@@ -1404,13 +1323,10 @@ class FamilyFSM(StatesGroup):
 async def call_openai_chat(user_text: str, profile_ctx: dict, mood: str = "нейтральное", memory: list = None):
     if not OPENROUTER_API_KEY:
         return await call_qwen_fallback(user_text, profile_ctx, mood, memory)
-    
     user_name = profile_ctx.get("name") or "пользователь"
     city = profile_ctx.get("city", CITY_DEFAULT)
     is_short = any(k in user_text.lower() for k in ["шутк", "анекдот", "прикол", "факт", "коротко", "в двух словах"])
-    
     style = get_age_appropriate_style(profile_ctx["age_group"], profile_ctx["gender"])
-    
     system_prompt = f"""Ты — AssistEmpat, личный помощник {user_name}. Город: {city}.
 ВОЗМОЖНОСТИ: задачи (с заметками), заметки (дерево), календарь, погода, кино, новости, дашборд, семейный режим.
 ПРАВИЛА:
@@ -1421,7 +1337,6 @@ async def call_openai_chat(user_text: str, profile_ctx: dict, mood: str = "не�
 5. {'Говори просто, как старший друг' if profile_ctx['age_group']=='child' else 'Будь на равных' if profile_ctx['age_group']=='teen' else 'Будь уважителен и конкретен' if profile_ctx['age_group']=='adult' else 'Объясняй пошагово, с заботой'}.
 6. Учитывай предпочтения: {', '.join(style['tone_modifiers'])}.
 Настроение: {mood}"""
-    
     fm, seen = [], set()
     for m in reversed(memory[-5:] if memory else []):
         c = m["content"].strip()
@@ -1429,7 +1344,6 @@ async def call_openai_chat(user_text: str, profile_ctx: dict, mood: str = "не�
             fm.insert(0,m)
             seen.add(c)
     ctx = "\n".join([f"{m['role']}: {m['content']}" for m in fm])
-    
     try:
         async with httpx.AsyncClient(timeout=15) as cl:
             r = await cl.post(
@@ -1457,12 +1371,9 @@ async def call_openai_chat(user_text: str, profile_ctx: dict, mood: str = "не�
 async def call_health_ai(user_text: str, profile_ctx: dict, health_mem: list):
     if not OPENROUTER_API_KEY:
         return await call_qwen_fallback(user_text, profile_ctx, "нейтральное", health_mem)
-    
     style = get_age_appropriate_style(profile_ctx["age_group"], profile_ctx["gender"])
-    
     system_prompt = f"""Ты — ассистент по здоровому образу жизни для {'ребёнка' if profile_ctx['age_group']=='child' else 'подростка' if profile_ctx['age_group']=='teen' else 'взрослого' if profile_ctx['age_group']=='adult' else 'пожилого человека'}.
 ПРАВИЛА: 1. Только ЗОЖ: режим, питание, гидратация, отдых, активность, гигиена, стресс-менеджмент. 2. НИКОГДА не называй препараты/БАДы/дозы. 3. При боли/температуре — рекомендуй врача. 4. {'Объясняй просто, с примерами' if profile_ctx['age_group']=='child' else 'Говори на равных' if profile_ctx['age_group']=='teen' else 'Будь конкретен' if profile_ctx['age_group']=='adult' else 'Объясняй пошагово, с заботой'}. 5. Дисклеймер: "Рекомендации не заменяют консультацию специалиста." Настроение учитывай, фокус на пользе."""
-    
     ctx = "\n".join([f"{m['role']}: {m['content']}" for m in health_mem[-4:]])
     try:
         async with httpx.AsyncClient(timeout=15) as cl:
@@ -1497,10 +1408,8 @@ def detect_psycho_style(text: str, mood: str, age_group: str) -> tuple[str, floa
 async def call_psycho_ai(user_text: str, profile_ctx: dict, psycho_mem: list, mood: str):
     if not OPENROUTER_API_KEY:
         return await call_qwen_fallback(user_text, profile_ctx, mood, psycho_mem)
-    
     style_name, temperature = detect_psycho_style(user_text, mood, profile_ctx["age_group"])
     style = get_age_appropriate_style(profile_ctx["age_group"], profile_ctx["gender"])
-    
     style_prompts = {
         "empathetic": f"""Ты — эмпатичный психоаналитик для {'ребёнка' if profile_ctx['age_group']=='child' else 'подростка' if profile_ctx['age_group']=='teen' else 'взрослого'}. Твоя задача — выслушать, отразить чувства, помочь разобраться в себе.
 ПРАВИЛА: 1. Начинай с отражения эмоций ("Я слышу, что ты чувствуешь..."). 2. Задавай {'простые' if profile_ctx['age_group']=='child' else 'мягкие'} уточняющие вопросы. 3. Не давай готовых решений — помогай найти свои. 4. {'Используй простые слова, эмодзи, хвали' if profile_ctx['age_group']=='child' else 'Будь тёплым, человечным, без клише'}. 5. Дисклеймер в конце сеанса: "Я не заменяю профессионального психолога." Настроение: {mood}""",
@@ -1511,10 +1420,8 @@ async def call_psycho_ai(user_text: str, profile_ctx: dict, psycho_mem: list, mo
         "sarcastic": f"""Ты — психоаналитик с лёгкой иронией для {'подростка' if profile_ctx['age_group']=='teen' else 'взрослого'}. Твоя задача — помочь увидеть ситуацию с юмором и снять напряжение.
 ПРАВИЛА: 1. Используй добрый сарказм, не обижая. 2. Помогай увидеть абсурдность застоя через юмор. 3. После иронии — мягкий переход к действиям. 4. Следи, чтобы пользователь был в ресурсе для такого тона. 5. Дисклеймер: "Я не заменяю профессионального психолога." Настроение: {mood}"""
     }
-    
     system_prompt = style_prompts.get(style_name, style_prompts["analytical"])
     ctx = "\n".join([f"{m['role']}: {m['content']}" for m in psycho_mem[-6:]])
-    
     try:
         async with httpx.AsyncClient(timeout=20) as cl:
             r = await cl.post(
@@ -1740,10 +1647,8 @@ async def cmd_family_join(msg: Message):
     if len(parts) < 2:
         await msg.answer("❌ Напиши: `/join <код>`")
         return
-    
     code = parts[1]
     success = await join_family_by_code(uid, code)
-    
     if success:
         family = await get_user_family(uid)
         await msg.answer(f"✅ **Ты в семье \"{family['group_name']}\"!**\nТеперь ты видишь общие задачи и события.")
@@ -2316,7 +2221,6 @@ async def cb_family_invite(call:CallbackQuery):
     if not family or family["role"] != "admin":
         await call.answer("❌ Только админ может приглашать", show_alert=True)
         return
-    
     code = await create_family_invite(family["group_id"], call.from_user.id)
     await call.message.answer(f"🔗 **Твой код приглашения**: `{code}`\n\nСкинь его тому, кого хочешь добавить. Код действует 24 часа.")
     await call.answer()
@@ -2376,27 +2280,23 @@ async def cb_ext_news(call:CallbackQuery):
     await call.answer()
 
 # ======================
-#  🔥 🔥  ОСНОВНОЙ ЧАТ (v4.9) 🔥 🔥 
+#  🔥 🔥  ОСНОВНОЙ ЧАТ (v4.9) 🔥 🔥
 # ======================
 @dp.message()
 async def chat(msg:Message, state:FSMContext):
     if not msg.text or await state.get_state():
         return
-    
     uid = msg.from_user.id
     text = fix_layout(msg.text.strip())
     text_lower = text.lower()
-    
     # 🔥 ПРЯМАЯ ПРОВЕРКА НА МЕНЮ
     if "меню" in text_lower or text_lower == "menu":
         family = await get_user_family(uid)
         await msg.answer("📋 **Меню**:", reply_markup=main_menu_keyboard(bool(family)))
         return
-    
-    async with db_pool.acquire() as conn: 
+    async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO users(user_id,name) VALUES ($1,$2) ON CONFLICT DO NOTHING", uid, msg.from_user.first_name)
     await update_last_activity(uid)
-    
     profile_ctx = await get_user_profile_context(uid)
     if not profile_ctx.get("name"):
         name,age,gender,city = extract_profile(text)
@@ -2405,9 +2305,7 @@ async def chat(msg:Message, state:FSMContext):
             profile_ctx = await get_user_profile_context(uid)
             await msg.answer(f"Запомнил: {name or city}")
             return
-    
     current_mode = profile_ctx.get("mode", "general")
-    
     # 🔥 РЕЖИМ ЗДОРОВЬЯ
     if current_mode == "health":
         if any(k in text_lower for k in HEALTH_EXIT_TRIGGERS) or should_reset_context(text) or is_topic_change(text, "health"):
@@ -2423,7 +2321,6 @@ async def chat(msg:Message, state:FSMContext):
         await save_health_context(uid, h_ctx)
         await msg.answer(answer)
         return
-    
     # 🔥 РЕЖИМ ПСИХОАНАЛИЗА
     if current_mode == "psycho":
         if any(k in text_lower for k in PSYCHO_EXIT_TRIGGERS) or should_reset_context(text) or is_topic_change(text, "psycho"):
@@ -2442,18 +2339,14 @@ async def chat(msg:Message, state:FSMContext):
         await save_psycho_context(uid, p_ctx)
         await msg.answer(answer)
         return
-
     # 🔥 ОБЩИЙ РЕЖИМ
     if should_reset_context(text) or any(kw in text_lower for kw in FRUSTRATION_KEYWORDS):
         await clear_user_context(uid)
-    
     memory = await get_memory(uid)
     mood = await get_mood(uid)
     await save_memory(uid, "user", text)
     await update_emotion(uid, text)
-    
     await update_activity_pattern(uid, "message", now_moscow())
-    
     cmd = parse_ru_command(text)
     if cmd:
         if cmd == "reset_context":
@@ -2530,7 +2423,6 @@ async def chat(msg:Message, state:FSMContext):
         elif cmd == "family_view":
             await cmd_family(msg)
             return
-    
     # Создание задач/заметок текстом
     if any(kw in text_lower for kw in ["создай задачу", "добавь задачу", "новая задача", "задача:"]):
         tt = text
@@ -2542,7 +2434,6 @@ async def chat(msg:Message, state:FSMContext):
             tid = await create_task(uid, title=tt, category="general", priority="medium")
             await msg.answer(f"✅ Задача #{tid} создана: {tt}\n\nИспользуй /tasks чтобы посмотреть все задачи", reply_markup=task_actions_keyboard(tid))
             return
-    
     if any(kw in text_lower for kw in ["запиши заметку", "создай заметку", "добавь заметку", "заметка:", "запиши"]):
         nc = text
         for kw in ["запиши заметку", "создай заметку", "добавь заметку", "заметка:", "запиши"]:
@@ -2553,11 +2444,9 @@ async def chat(msg:Message, state:FSMContext):
             nid = await create_note(uid, content=nc, category="general")
             await msg.answer(f"✅ Заметка #{nid} сохранена!\n\nИспользуй /notes чтобы посмотреть все заметки", reply_markup=note_actions_keyboard(nid))
             return
-    
     if any(kw in text_lower for kw in ["добавь событие", "создай событие", "встреча:", "план:"]):
         await msg.answer("📅 Для создания события используй команду /event — так будет надёжнее!")
         return
-    
     answer = await call_openai_chat(text, profile_ctx, mood, memory)
     await msg.answer(answer)
 
@@ -2586,7 +2475,7 @@ async def morning_ping():
     async with db_pool.acquire() as conn:
         users = await conn.fetch("SELECT user_id FROM users")
     for u in users:
-        try: 
+        try:
             profile_ctx = await get_user_profile_context(u["user_id"])
             data = await get_dashboard_data(u["user_id"], profile_ctx)
             await bot.send_message(u["user_id"], f"☀️ **План на день**\n\n" + format_dashboard(data), parse_mode="Markdown")
@@ -2635,90 +2524,67 @@ async def calendar_reminder_check():
         except:
             pass
 
-## ======================
-#  🔥 HEALTH CHECK / ЗАПУСК (исправлено)
+# ======================
+#  🔥 HEALTH CHECK / ЗАПУСК (ИСПРАВЛЕНО)
 # ======================
 async def health_handler(request):
-    """Health endpoint с проверкой готовности"""
+    """Health endpoint для Railway"""
     status = {
         "status": "ok" if db_pool and bot.session else "starting",
         "bot": "AssistEmpat v4.9",
         "db": "connected" if db_pool else "connecting",
-        "polling": "running" if dp and hasattr(dp, '_running') else "stopped",
         "timestamp": now_moscow().isoformat()
     }
     status_code = 200 if status["status"] == "ok" else 503
     return web.json_response(status, status=status_code, headers={"Content-Type": "application/json"})
 
 async def start_health_server():
-    """Поднимает health-сервер ДО начала polling"""
+    """Запускает aiohttp сервер в фоне"""
     app = web.Application()
     app.router.add_get('/health', health_handler)
-    app.router.add_get('/', health_handler)  # корень тоже отвечает
-    
+    app.router.add_get('/', health_handler)
     runner = web.AppRunner(app)
     await runner.setup()
-    
-    # Пробуем занять порт с повторами
-    for attempt in range(3):
-        try:
-            site = web.TCPSite(runner, '0.0.0.0', HEALTH_PORT)
-            await site.start()
-            logging.info(f"🏥 Health server started on port {HEALTH_PORT}")
-            return runner
-        except OSError as e:
-            if "Address already in use" in str(e):
-                logging.warning(f"⚠️ Port {HEALTH_PORT} busy, retry {attempt+1}/3...")
-                await asyncio.sleep(1)
-            else:
-                raise
-    raise RuntimeError(f"❌ Could not bind to port {HEALTH_PORT} after 3 attempts")
+    port = int(os.getenv("PORT", os.getenv("RAILWAY_PUBLIC_PORT", 8080)))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logging.info(f"🏥 Health server running on port {port}")
+    return runner
 
 async def main():
-    logging.info(f"🚀 Starting AssistEmpat v4.9 (port={HEALTH_PORT}, TZ=Moscow)")
-    
-    # 🔥 1. Валидация переменных окружения
-    required_vars = ["BOT_TOKEN", "DATABASE_URL"]
-    missing = [v for v in required_vars if not os.getenv(v)]
-    if missing:
-        logging.error(f"❌ Missing required env vars: {missing}")
-        return  # Выходим чисто, чтобы оркестратор увидел ошибку
-    
+    logging.info(f"🚀 Starting AssistEmpat v4.9")
+    # 🔥 1. Проверка переменных
+    if not os.getenv("BOT_TOKEN"):
+        logging.critical("❌ BOT_TOKEN not set!")
+        return
+    if not os.getenv("DATABASE_URL"):
+        logging.critical("❌ DATABASE_URL not set!")
+        return
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
-    
     def handle_signal():
         logging.info("🛑 Signal received")
         stop_event.set()
-    
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, handle_signal)
-    
-    # 🔥 2. Health server запускаем ПЕРВЫМ (до БД!)
+    # 🔥 2. Health server — ПЕРВЫМ!
     health_runner = None
     try:
         health_runner = await start_health_server()
     except Exception as e:
         logging.error(f"❌ Health server failed: {e}")
         return
-    
-    # 🔥 3. Инициализация БД с таймаутом
+    # 🔥 3. Инициализация БД
     try:
-        await asyncio.wait_for(init_db(), timeout=30.0)
+        await init_db()
         logging.info("✅ DB initialized")
-    except asyncio.TimeoutError:
-        logging.error("❌ DB init timeout (30s)")
-        await cleanup(health_runner)
-        return
     except Exception as e:
         logging.error(f"❌ DB init failed: {e}")
         await cleanup(health_runner)
         return
-    
     if stop_event.is_set():
         await cleanup(health_runner)
         return
-    
     # 🔥 4. Планировщик
     scheduler.start()
     scheduler.add_job(morning_quote, "cron", hour=8, minute=0)
@@ -2728,24 +2594,25 @@ async def main():
     scheduler.add_job(habit_check, "interval", hours=6)
     scheduler.add_job(task_reminder_check, "interval", minutes=30)
     scheduler.add_job(calendar_reminder_check, "interval", minutes=30)
-    logging.info("✅ Scheduler started (Moscow TZ)")
-    
-    # 🔥 5. Webhook cleanup
+    logging.info("✅ Scheduler started")
     await bot.delete_webhook(drop_pending_updates=True)
-    
     if stop_event.is_set():
         await cleanup(health_runner)
         return
-    
-    # 🔥 6. START POLLING (только после всех проверок)
+    # 🔥 5. POLLING — в фоне
     logging.info("✅ AssistEmpat v4.9 ready — STARTING POLLING")
-    
-    try:
-        await dp.start_polling(bot)
-    except asyncio.CancelledError:
-        logging.info("🔄 Polling cancelled")
-    finally:
-        await cleanup(health_runner)
+    polling_task = asyncio.create_task(dp.start_polling(bot))
+    done, pending = await asyncio.wait(
+        [polling_task, asyncio.create_task(stop_event.wait())],
+        return_when=asyncio.FIRST_COMPLETED
+    )
+    for task in pending:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+    await cleanup(health_runner)
 
 async def cleanup(health_runner=None):
     logging.info("👋 Cleaning up...")
@@ -2762,4 +2629,11 @@ async def cleanup(health_runner=None):
         try: await health_runner.cleanup()
         except: pass
     logging.info("✅ Cleanup complete")
-    
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("👋 Stopped by user")
+    except Exception as e:
+        logging.error(f"💥 Fatal error: {e}")
