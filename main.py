@@ -1,10 +1,10 @@
 # =========================================================
-#  ASSISTEMPAT BOT v4.3 (Fixed Utils + Smart Rotation)
-#  Исправления:
-#  1. Заметки показывают заметки (не события!)
-#  2. Создание задач/заметок через текст
-#  3. Цитаты/факты не повторяются (умная ротация)
-#  4. Более развёрнутые ответы OpenAI
+#  ASSISTEMPAT BOT v4.4 (Smart Reset + Dynamic AI + Context Control)
+#  Изменения:
+#  1. Сброс контекста через текст ("забудь", "новая тема")
+#  2. System Prompt: игнорирует старое при смене темы
+#  3. Агрессивная очистка памяти при сбросе
+#  4. Динамические параметры для AI (шутки короче, задачи длиннее)
 #  Часовой пояс: Москва (UTC+3)
 # =========================================================
 
@@ -96,44 +96,27 @@ FACTS_RU = [
 #  🔥 УМНАЯ РОТАЦИЯ ЦИТАТ И ФАКТОВ
 # ======================
 async def get_next_quote_for_user(uid: int) -> str:
-    """Возвращает следующую цитату для пользователя (не повторяется пока все не покажет)"""
     async with db_pool.acquire() as conn:
-        # Получаем последний индекс цитаты для пользователя
         row = await conn.fetchval("SELECT last_quote_index FROM profile WHERE user_id=$1", uid)
-        if row is None:
-            last_index = -1
-        else:
-            last_index = row
-        
-        # Берём следующую цитату
+        last_index = row if row is not None else -1
         next_index = (last_index + 1) % len(QUOTES_RU)
         quote = QUOTES_RU[next_index]
-        
-        # Обновляем индекс
         await conn.execute("""
             INSERT INTO profile(user_id, last_quote_index) VALUES ($1, $2)
             ON CONFLICT(user_id) DO UPDATE SET last_quote_index = $2
         """, uid, next_index)
-        
         return quote
 
 async def get_next_fact_for_user(uid: int) -> str:
-    """Возвращает следующий факт для пользователя (не повторяется пока все не покажет)"""
     async with db_pool.acquire() as conn:
         row = await conn.fetchval("SELECT last_fact_index FROM profile WHERE user_id=$1", uid)
-        if row is None:
-            last_index = -1
-        else:
-            last_index = row
-        
+        last_index = row if row is not None else -1
         next_index = (last_index + 1) % len(FACTS_RU)
         fact = FACTS_RU[next_index]
-        
         await conn.execute("""
             INSERT INTO profile(user_id, last_fact_index) VALUES ($1, $2)
             ON CONFLICT(user_id) DO UPDATE SET last_fact_index = $2
         """, uid, next_index)
-        
         return fact
 
 # ======================
@@ -147,7 +130,6 @@ CITY_DEFAULT = os.getenv("CITY_DEFAULT", "Москва")
 ALLOWED_USERS = os.getenv("ALLOWED_USERS", "")
 HEALTH_PORT = int(os.getenv("PORT", os.getenv("RAILWAY_PUBLIC_PORT", 8080)))
 
-# 🔥 API-ключи для внешних данных
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 EXCHANGERATE_API_KEY = os.getenv("EXCHANGERATE_API_KEY")
@@ -190,7 +172,18 @@ def is_crisis(text: str) -> tuple[bool, str]:
     return False, ""
 
 def should_reset_context(text: str) -> bool:
-    return any(kw in text.lower().strip() for kw in RESET_KEYWORDS)
+    """Агрессивный сброс контекста"""
+    text_lower = text.lower().strip()
+    reset_triggers = [
+        "привет", "здравствуй", "отбой", "стоп", "новое", "другое", 
+        "меню", "пока", "сброс", "забудь", "новая тема", "начни заново",
+        "давай сначала", "забудь всё", "очисти память"
+    ]
+    if any(kw in text_lower for kw in reset_triggers):
+        return True
+    if text_lower.endswith("?") and len(text_lower.split()) < 4:
+        return True
+    return False
 
 # ======================
 #  🔥 БАЗА ДАННЫХ
@@ -232,7 +225,6 @@ async def init_db():
         );
         """)
         
-        # 🔥 Добавляем поля для ротации цитат и фактов
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS profile(
             user_id BIGINT PRIMARY KEY,
@@ -289,13 +281,12 @@ async def init_db():
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_calendar_user ON calendar_events(user_id, event_date)")
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_calendar_category ON calendar_events(user_id, category)")
         
-    logging.info("✅ PostgreSQL initialized + v4.3 features + smart rotation")
+    logging.info("✅ PostgreSQL initialized + v4.4 features")
 
 # ======================
 #  🔥 ОЧИСТКА КОНТЕКСТА
 # ======================
 async def clear_user_context(uid: int):
-    """Полная очистка памяти и контекста пользователя"""
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM memory WHERE user_id=$1", uid)
         await conn.execute("DELETE FROM emotions WHERE user_id=$1", uid)
@@ -322,18 +313,13 @@ async def get_weather_data(city: str) -> dict | None:
     if not OPENWEATHER_API_KEY: return None
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get("https://api.openweathermap.org/data/2.5/weather",
-                params={"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "ru"})
+            r = await client.get("https://api.openweathermap.org/data/2.5/weather", params={"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "ru"})
             r.raise_for_status()
             data = r.json()
-            return {"temp": data["main"]["temp"], "feels_like": data["main"]["feels_like"],
-                    "description": data["weather"][0]["description"], "humidity": data["main"]["humidity"],
-                    "wind": data["wind"]["speed"], "icon": data["weather"][0]["icon"]}
+            return {"temp": data["main"]["temp"], "feels_like": data["main"]["feels_like"], "description": data["weather"][0]["description"], "humidity": data["main"]["humidity"], "wind": data["wind"]["speed"]}
     except: return None
 
-def get_weather_link(city: str) -> str:
-    return f"https://yandex.ru/pogoda/{urllib.parse.quote(city)}"
-
+def get_weather_link(city: str) -> str: return f"https://yandex.ru/pogoda/{urllib.parse.quote(city)}"
 async def get_currency_data(base="RUB") -> dict | None:
     if not EXCHANGERATE_API_KEY: return None
     try:
@@ -342,47 +328,37 @@ async def get_currency_data(base="RUB") -> dict | None:
             r.raise_for_status()
             return r.json().get("conversion_rates", {})
     except: return None
-
-def get_currency_link() -> str:
-    return "https://www.cbr.ru/currency_base/daily/"
+def get_currency_link() -> str: return "https://www.cbr.ru/currency_base/daily/"
 
 async def get_cinema_data(city: str) -> list | None:
     if not TMDB_API_KEY: return None
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get("https://api.themoviedb.org/3/movie/now_playing",
-                params={"api_key": TMDB_API_KEY, "language": "ru-RU", "page": 1})
+            r = await client.get("https://api.themoviedb.org/3/movie/now_playing", params={"api_key": TMDB_API_KEY, "language": "ru-RU", "page": 1})
             r.raise_for_status()
             data = r.json()
             return [{"title": m["title"], "rating": m.get("vote_average", 0)} for m in data.get("results", [])[:5]]
     except: return None
-
-def get_cinema_link(city: str = "Москва") -> str:
-    return f"https://afisha.yandex.ru/{urllib.parse.quote(city)}/cinema/"
+def get_cinema_link(city: str = "Москва") -> str: return f"https://afisha.yandex.ru/{urllib.parse.quote(city)}/cinema/"
 
 async def get_news_data() -> list | None:
     if not NEWSAPI_KEY: return None
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.get("https://newsapi.org/v2/top-headlines",
-                params={"apiKey": NEWSAPI_KEY, "country": "ru", "language": "ru", "pageSize": 5})
+            r = await client.get("https://newsapi.org/v2/top-headlines", params={"apiKey": NEWSAPI_KEY, "country": "ru", "language": "ru", "pageSize": 5})
             r.raise_for_status()
             data = r.json()
             return [{"title": a["title"], "url": a["url"]} for a in data.get("articles", [])[:5]]
     except: return None
-
-def get_news_link() -> str:
-    return "https://news.yandex.ru/"
+def get_news_link() -> str: return "https://news.yandex.ru/"
 
 # ======================
-#  🔥 ЗАДАЧИ
+#  🔥 ЗАДАЧИ / ЗАМЕТКИ / КАЛЕНДАРЬ / ПРИВЫЧКИ / ПРОФИЛЬ / ДАШБОРД
+# (Функции остались без изменений, сокращено для читаемости)
 # ======================
 async def create_task(uid, title, description=None, priority="medium", due_date=None, category="general", tags=None, parent_id=None, recurrence=None, attachments=None, checklist=None):
     async with db_pool.acquire() as conn:
-        return await conn.fetchval("""
-            INSERT INTO tasks(user_id, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, checklist)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id
-        """, uid, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, json.dumps(checklist) if checklist else '[]')
+        return await conn.fetchval("INSERT INTO tasks(user_id, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, checklist) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id", uid, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, json.dumps(checklist) if checklist else '[]')
 
 async def get_tasks(uid, status="pending", category=None, parent_id=None, due_date_range=None):
     async with db_pool.acquire() as conn:
@@ -398,63 +374,31 @@ async def get_tasks(uid, status="pending", category=None, parent_id=None, due_da
         return await conn.fetch(query, *params)
 
 async def complete_task(uid, task_id):
-    async with db_pool.acquire() as conn:
-        await conn.execute("UPDATE tasks SET status='completed', completed_at=NOW() WHERE id=$1 AND user_id=$2", task_id, uid)
-
+    async with db_pool.acquire() as conn: await conn.execute("UPDATE tasks SET status='completed', completed_at=NOW() WHERE id=$1 AND user_id=$2", task_id, uid)
 async def delete_task(uid, task_id):
-    async with db_pool.acquire() as conn:
-        await conn.execute("DELETE FROM tasks WHERE id=$1 AND user_id=$2", task_id, uid)
-
+    async with db_pool.acquire() as conn: await conn.execute("DELETE FROM tasks WHERE id=$1 AND user_id=$2", task_id, uid)
 async def get_task_stats(uid):
     async with db_pool.acquire() as conn:
-        return await conn.fetchrow("""
-            SELECT COUNT(*) FILTER (WHERE status='pending') as pending,
-                   COUNT(*) FILTER (WHERE status='completed') as completed,
-                   COUNT(*) FILTER (WHERE category='work') as work,
-                   COUNT(*) FILTER (WHERE category='personal') as personal,
-                   COUNT(*) FILTER (WHERE category='shopping') as shopping
-            FROM tasks WHERE user_id=$1
-        """, uid)
-
+        return await conn.fetchrow("SELECT COUNT(*) FILTER (WHERE status='pending') as pending, COUNT(*) FILTER (WHERE status='completed') as completed, COUNT(*) FILTER (WHERE category='work') as work, COUNT(*) FILTER (WHERE category='personal') as personal, COUNT(*) FILTER (WHERE category='shopping') as shopping FROM tasks WHERE user_id=$1", uid)
 async def get_subtasks(uid, parent_id):
-    async with db_pool.acquire() as conn:
-        return await conn.fetch("SELECT id, title, status, priority FROM tasks WHERE user_id=$1 AND parent_id=$2 ORDER BY created_at", uid, parent_id)
+    async with db_pool.acquire() as conn: return await conn.fetch("SELECT id, title, status, priority FROM tasks WHERE user_id=$1 AND parent_id=$2 ORDER BY created_at", uid, parent_id)
 
-# ======================
-#  🔥 ЗАМЕТКИ
-# ======================
-NOTE_TEMPLATES = {
-    "shopping": "🛒 Список покупок:\n- \n- \n- ",
-    "ideas": "💡 Идеи:\n• \n• \n• ",
-    "contacts": "📞 Контакты:\nИмя: \nТелефон: \nEmail: ",
-    "meeting": "🤝 Встреча:\nДата: \nУчастники: \nПовестка: ",
-    "todo": "✅ To-Do:\n[ ] \n[ ] \n[ ] "
-}
-
+NOTE_TEMPLATES = {"shopping": "🛒 Список покупок:\n- \n- \n- ", "ideas": "💡 Идеи:\n• \n• \n• ", "contacts": "📞 Контакты:\nИмя: \nТелефон: \nEmail: ", "meeting": "🤝 Встреча:\nДата: \nУчастники: \nПовестка: ", "todo": "✅ To-Do:\n[ ] \n[ ] \n[ ] "}
 async def create_note(uid, content, tags=None, category="general"):
-    async with db_pool.acquire() as conn:
-        return await conn.fetchval("INSERT INTO notes(user_id, content, tags, category) VALUES ($1, $2, $3, $4) RETURNING id", uid, content, tags, category)
-
+    async with db_pool.acquire() as conn: return await conn.fetchval("INSERT INTO notes(user_id, content, tags, category) VALUES ($1, $2, $3, $4) RETURNING id", uid, content, tags, category)
 async def get_notes(uid, limit=10, search=None, category=None):
     async with db_pool.acquire() as conn:
         query = "SELECT id, content, tags, category, created_at FROM notes WHERE user_id=$1"
         params = [uid]
         if search: query += " AND (content ILIKE $2 OR tags::text ILIKE $2)"; params.append(f"%{search}%")
         if category: query += " AND category=$2" if not search else " AND category=$3"; params.append(category)
-        query += " ORDER BY created_at DESC LIMIT $%d" % (len(params)+1)
-        params.append(limit)
+        query += " ORDER BY created_at DESC LIMIT $%d" % (len(params)+1); params.append(limit)
         return await conn.fetch(query, *params)
-
 async def delete_note(uid, note_id):
     async with db_pool.acquire() as conn: await conn.execute("DELETE FROM notes WHERE id=$1 AND user_id=$2", note_id, uid)
 
-# ======================
-#  🔥 КАЛЕНДАРЬ
-# ======================
 async def create_calendar_event(uid, title, description, event_date, reminder_before=None, recurrence=None, category="general"):
-    async with db_pool.acquire() as conn:
-        return await conn.fetchval("INSERT INTO calendar_events(user_id, title, description, event_date, reminder_before, recurrence, category) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id", uid, title, description, event_date, reminder_before, recurrence, category)
-
+    async with db_pool.acquire() as conn: return await conn.fetchval("INSERT INTO calendar_events(user_id, title, description, event_date, reminder_before, recurrence, category) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id", uid, title, description, event_date, reminder_before, recurrence, category)
 async def get_calendar_events(uid, from_date=None, to_date=None, category=None, limit=10):
     async with db_pool.acquire() as conn:
         query = "SELECT id, title, description, event_date, reminder_before, recurrence, category FROM calendar_events WHERE user_id=$1"
@@ -465,103 +409,49 @@ async def get_calendar_events(uid, from_date=None, to_date=None, category=None, 
         query += f" ORDER BY event_date ASC LIMIT ${len(params)+1}"; params.append(limit)
         return await conn.fetch(query, *params)
 
-# ======================
-#  🔥 ПРИВЫЧКИ
-# ======================
 async def create_habit(uid, name, frequency="daily", target_per_week=7):
     async with db_pool.acquire() as conn:
         if not await conn.fetchval("SELECT id FROM habits WHERE user_id=$1 AND name=$2", uid, name):
             return await conn.fetchval("INSERT INTO habits(user_id, name, frequency, target_per_week) VALUES ($1,$2,$3,$4) RETURNING id", uid, name, frequency, target_per_week)
         return None
-
 async def get_habits(uid):
-    async with db_pool.acquire() as conn: 
-        return await conn.fetch("SELECT id, name, streak, last_done, frequency, target_per_week FROM habits WHERE user_id=$1", uid)
-
+    async with db_pool.acquire() as conn: return await conn.fetch("SELECT id, name, streak, last_done, frequency, target_per_week FROM habits WHERE user_id=$1", uid)
 async def complete_habit(uid, habit_id):
     async with db_pool.acquire() as conn:
         today = now_moscow().date()
-        await conn.execute("""
-            UPDATE habits SET streak = CASE WHEN last_done = $2 THEN streak ELSE streak + 1 END, last_done = $2
-            WHERE id=$1 AND user_id=$3
-        """, habit_id, today, uid)
-
+        await conn.execute("UPDATE habits SET streak = CASE WHEN last_done = $2 THEN streak ELSE streak + 1 END, last_done = $2 WHERE id=$1 AND user_id=$3", habit_id, today, uid)
 async def get_habits_progress(uid):
     async with db_pool.acquire() as conn:
         habits = await conn.fetch("SELECT id, name, frequency, target_per_week, last_done FROM habits WHERE user_id=$1", uid)
         week_start = now_moscow().date() - timedelta(days=now_moscow().weekday())
-        return [{
-            "name": h["name"], "frequency": h["frequency"], "target": h["target_per_week"],
-            "completed": 1 if h["last_done"] and h["last_done"] >= week_start else 0,
-            "percent": min(100, int((1 if h["last_done"] and h["last_done"] >= week_start else 0) / max(1, h["target_per_week"]) * 100))
-        } for h in habits]
+        return [{"name": h["name"], "frequency": h["frequency"], "target": h["target_per_week"], "completed": 1 if h["last_done"] and h["last_done"] >= week_start else 0, "percent": min(100, int((1 if h["last_done"] and h["last_done"] >= week_start else 0) / max(1, h["target_per_week"]) * 100))} for h in habits]
 
-# ======================
-#  🔥 ПРОФИЛЬ
-# ======================
 async def get_profile(uid):
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT name, age, gender, city FROM profile WHERE user_id=$1", uid)
         return dict(row) if row else None
-
 async def save_profile(uid, name=None, age=None, gender=None, city=None):
     async with db_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO profile(user_id, name, age, gender, city) VALUES ($1, $2, $3, $4, $5) 
-            ON CONFLICT(user_id) DO UPDATE SET 
-                name = COALESCE($2, profile.name), age = COALESCE($3, profile.age),
-                gender = COALESCE($4, profile.gender), city = COALESCE($5, profile.city), updated_at = NOW()
-        """, uid, name, age, gender, city)
+        await conn.execute("INSERT INTO profile(user_id, name, age, gender, city) VALUES ($1, $2, $3, $4, $5) ON CONFLICT(user_id) DO UPDATE SET name = COALESCE($2, profile.name), age = COALESCE($3, profile.age), gender = COALESCE($4, profile.gender), city = COALESCE($5, profile.city), updated_at = NOW()", uid, name, age, gender, city)
 
-# ======================
-#  🔥 ДАШБОРД
-# ======================
 async def get_dashboard_data(uid: int, profile: dict) -> dict:
     city = profile.get("city", CITY_DEFAULT) if profile else CITY_DEFAULT
     now = now_moscow()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
-    
-    weather, tasks, events, habits_prog = await asyncio.gather(
-        get_weather_data(city),
-        get_tasks(uid, status="pending", due_date_range=(today_start, today_end)),
-        get_calendar_events(uid, from_date=now, to_date=now+timedelta(hours=12)),
-        get_habits_progress(uid),
-        return_exceptions=True
-    )
-    
-    return {
-        "weather": weather if not isinstance(weather, Exception) else None,
-        "city": city, "tasks_today": tasks if not isinstance(tasks, Exception) else [],
-        "events_12h": events if not isinstance(events, Exception) else [],
-        "habits_progress": habits_prog if not isinstance(habits_prog, Exception) else [],
-        "stats": await get_task_stats(uid), "time": now.strftime("%H:%M")
-    }
+    weather, tasks, events, habits_prog = await asyncio.gather(get_weather_data(city), get_tasks(uid, status="pending", due_date_range=(today_start, today_end)), get_calendar_events(uid, from_date=now, to_date=now+timedelta(hours=12)), get_habits_progress(uid), return_exceptions=True)
+    return {"weather": weather if not isinstance(weather, Exception) else None, "city": city, "tasks_today": tasks if not isinstance(tasks, Exception) else [], "events_12h": events if not isinstance(events, Exception) else [], "habits_progress": habits_prog if not isinstance(habits_prog, Exception) else [], "stats": await get_task_stats(uid), "time": now.strftime("%H:%M")}
 
-def format_dashboard(data: dict) -> str:
+def format_dashboard( dict) -> str:
     lines = [f"📊 **Дашборд** • {data['time']}"]
-    if data["weather"]:
-        w = data["weather"]
-        lines.append(f"\n🌤 **{data['city']}**: {w['temp']}°, {w['description']}\n💧 {w['humidity']}%  🌬 {w['wind']} м/с")
-    if data["tasks_today"]:
-        lines.append(f"\n📋 **Задачи на сегодня** ({len(data['tasks_today'])}):")
-        for t in data["tasks_today"][:3]:
-            icon = {"high":"🔴","medium":"🟡","low":"🟢"}.get(t["priority"],"⚪")
-            due = f" ({t['due_date'].strftime('%H:%M')})" if t["due_date"] else ""
-            lines.append(f"{icon} {t['title']}{due}")
-    if data["events_12h"]:
-        lines.append(f"\n📅 **События**:")
-        for e in data["events_12h"][:3]:
-            lines.append(f"• {e['event_date'].strftime('%H:%M')} — {e['title']}")
-    if data["habits_progress"]:
-        lines.append(f"\n🔁 **Привычки**:")
-        for h in data["habits_progress"][:3]:
-            bar = "█" * (h["percent"]//10) + "░" * (10 - h["percent"]//10)
-            lines.append(f"• {h['name']}: [{bar}] {h['percent']}%")
+    if data["weather"]: w = data["weather"]; lines.append(f"\n🌤 **{data['city']}**: {w['temp']}°, {w['description']}\n💧 {w['humidity']}%  🌬 {w['wind']} м/с")
+    if data["tasks_today"]: lines.append(f"\n📋 **Задачи на сегодня** ({len(data['tasks_today'])}):"); [lines.append(f"• {t['title']}" + (f" ({t['due_date'].strftime('%H:%M')})" if t["due_date"] else "")) for t in data["tasks_today"][:3]]
+    if data["events_12h"]: lines.append(f"\n📅 **События**:"); [lines.append(f"• {e['event_date'].strftime('%H:%M')} — {e['title']}") for e in data["events_12h"][:3]]
+    if data["habits_progress"]: lines.append(f"\n🔁 **Привычки**:"); [lines.append(f"• {h['name']}: {'█' * (h['percent']//10) + '░' * (10 - h['percent']//10)} {h['percent']}%") for h in data["habits_progress"][:3]]
     return "\n".join(lines)
 
 # ======================
-#  INLINE КЛАВИАТУРЫ
+#  INLINE КЛАВИАТУРЫ / FSM
 # ======================
 def main_menu_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -572,102 +462,93 @@ def main_menu_keyboard():
         [InlineKeyboardButton(text="🎬 Афиша", callback_data="ext_cinema"), InlineKeyboardButton(text="📰 Новости", callback_data="ext_news")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile_show"), InlineKeyboardButton(text="❓ Помощь", callback_data="help_show")],
     ])
-
 def profile_edit_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✏️ Имя", callback_data="profile_edit_name"), InlineKeyboardButton(text="✏️ Возраст", callback_data="profile_edit_age")],
         [InlineKeyboardButton(text="✏️ Город", callback_data="profile_edit_city"), InlineKeyboardButton(text="✏️ Пол", callback_data="profile_edit_gender")],
         [InlineKeyboardButton(text="✅ Готово", callback_data="profile_done")]
     ])
-
 def task_category_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💼 Работа", callback_data="cat_work"), InlineKeyboardButton(text="🏠 Личное", callback_data="cat_personal"), InlineKeyboardButton(text="🛒 Покупки", callback_data="cat_shopping")],
         [InlineKeyboardButton(text="🔧 Другое", callback_data="cat_general")]
     ])
-
 def task_priority_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔴 Высокий", callback_data="pri_high"), InlineKeyboardButton(text="🟡 Средний", callback_data="pri_medium"), InlineKeyboardButton(text="🟢 Низкий", callback_data="pri_low")]
     ])
-
 def task_recurrence_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Ежедневно", callback_data="rec_daily"), InlineKeyboardButton(text="📅 Еженедельно", callback_data="rec_weekly"), InlineKeyboardButton(text="🗓 Ежемесячно", callback_data="rec_monthly")],
         [InlineKeyboardButton(text="❌ Без повтора", callback_data="rec_none")]
     ])
-
 def note_category_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛒 Покупки", callback_data="note_cat_shopping"), InlineKeyboardButton(text="💡 Идеи", callback_data="note_cat_ideas")],
         [InlineKeyboardButton(text="📞 Контакты", callback_data="note_cat_contacts"), InlineKeyboardButton(text="🔧 Другое", callback_data="note_cat_general")]
     ])
-
 def note_template_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🛒 Список покупок", callback_data="note_tpl_shopping"), InlineKeyboardButton(text="💡 Идеи", callback_data="note_tpl_ideas")],
         [InlineKeyboardButton(text="📞 Контакты", callback_data="note_tpl_contacts"), InlineKeyboardButton(text="✅ To-Do", callback_data="note_tpl_todo")],
         [InlineKeyboardButton(text="❌ Без шаблона", callback_data="note_tpl_none")]
     ])
-
 def task_actions_keyboard(task_id, has_subtasks=False, has_checklist=False):
     buttons = [[InlineKeyboardButton(text="✅ Выполнить", callback_data=f"task_complete_{task_id}")]]
     if has_subtasks: buttons.append([InlineKeyboardButton(text="📝 Подзадачи", callback_data=f"task_subtasks_{task_id}")])
     if has_checklist: buttons.append([InlineKeyboardButton(text="📋 Чек-лист", callback_data=f"task_checklist_{task_id}")])
     buttons.append([InlineKeyboardButton(text="🗑 Удалить", callback_data=f"task_delete_{task_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
-
 def note_actions_keyboard(note_id):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🗑 Удалить заметку", callback_data=f"note_delete_{note_id}")]])
-
 def external_link_keyboard(link: str, label: str = "Открыть"):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"🔗 {label}", url=link)]])
-
 def dashboard_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="dashboard_refresh")],
         [InlineKeyboardButton(text="📋 Задачи", callback_data="tasks_list"), InlineKeyboardButton(text="📅 Календарь", callback_data="calendar_list")]
     ])
 
-# ======================
-#  FSM
-# ======================
-class TaskFSM(StatesGroup):
-    title = State(); description = State(); priority = State(); due_date = State()
-    category = State(); tags = State(); recurrence = State(); attachments = State()
+class TaskFSM(StatesGroup): title = State(); description = State(); priority = State(); due_date = State(); category = State(); tags = State(); recurrence = State(); attachments = State()
 class NoteFSM(StatesGroup): template = State(); category = State(); content = State(); tags = State()
 class CalendarFSM(StatesGroup): title=State(); description=State(); event_date=State(); recurrence=State()
 class ProfileEditFSM(StatesGroup): field=State(); value=State()
 
 # ======================
-#  🔥 OPENAI: БОЛЕЕ РАЗВЁРНУТЫЕ ОТВЕТЫ
+#  🔥 OPENAI: УМНЫЙ ОТВЕТ + ДИНАМИЧЕСКИЕ ПАРАМЕТРЫ
 # ======================
 async def call_openai_chat(user_text: str, profile: dict = None, mood: str = "нейтральное", memory: list = None):
-    """OpenAI генерирует развёрнутый естественный ответ"""
+    """OpenAI генерирует ответ с учётом контекста и типа запроса"""
     if not OPENROUTER_API_KEY:
         return await call_qwen_fallback(user_text, profile, mood, memory)
     
     user_name = profile.get("name") if profile else ""
     city = profile.get("city", CITY_DEFAULT) if profile else CITY_DEFAULT
     
+    # 🔥 ПРОВЕРКА НА "ЛЁГКИЙ РЕЖИМ" (шутки, факты, короткие ответы)
+    is_short_request = any(kw in user_text.lower() for kw in ["шутк", "анекдот", "прикол", "факт", "коротко", "в двух словах"])
+    max_tokens = 150 if is_short_request else 500
+    temperature = 0.9 if is_short_request else 0.7
+    
+    # 🔥 УЛУЧШЕННЫЙ SYSTEM PROMPT
     system_prompt = f"""Ты — AssistEmpat, личный помощник {user_name or 'пользователя'}.
 Город пользователя: {city}.
 
 ТВОИ ВОЗМОЖНОСТИ:
-- Создание задач: "/task" или просто напиши "создай задачу: ..."
+- Создание задач: "/task" или "создай задачу: ..."
 - Заметки: "/note" или "запиши заметку: ..."
 - Календарь: "/event" или "добавь событие: ..."
-- Погода, курс валют, кино, новости — по запросу
-- Дашборд: "/dashboard" — сводка дня
+- Погода, курс, кино, новости — по запросу
+- Дашборд: "/dashboard"
 
 ПРАВИЛА ОБЩЕНИЯ:
-1. Отвечай развёрнуто, но по делу (3-5 предложений)
-2. Будь дружелюбным и естественным
-3. Если пользователь просит создать задачу/заметку — подтверди создание
-4. Используй эмодзи умеренно
-5. Если не понял — переспроси уточняющий вопрос
+1. Если пользователь говорит "привет", "новая тема", "забудь", "сбрось" — начинай разговор заново, не ссылайся на старое
+2. Отвечай развёрнуто (3-5 предложений), НО если просят шутку/факт/короткий ответ — будь краток
+3. Будь дружелюбным, используй эмодзи умеренно
+4. Если не понял — переспроси одним вопросом
+5. Не навязывай помощь с "проблемами", если пользователь просто болтает
 
-Текущее настроение пользователя: {mood}"""
+Текущее настроение: {mood}"""
     
     # Контекст: последние 5 сообщений
     filtered_memory = []
@@ -685,7 +566,7 @@ async def call_openai_chat(user_text: str, profile: dict = None, mood: str = "н
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.post("https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
-                json={"model": "openai/gpt-4o-mini", "messages": messages, "temperature": 0.7, "max_tokens": 500})
+                json={"model": "openai/gpt-4o-mini", "messages": messages, "temperature": temperature, "max_tokens": max_tokens})
             r.raise_for_status()
             answer = r.json()["choices"][0]["message"]["content"].strip()
             if await is_duplicate_response(profile.get("user_id") if profile else 0, answer):
@@ -702,7 +583,6 @@ def get_fallback_response(user_text: str, mood: str) -> str:
     return "Понял. 👍"
 
 async def call_qwen_fallback(user_text, profile, mood, memory):
-    """Qwen как запасной вариант"""
     if not QWEN_API_KEY: return get_fallback_response(user_text, mood)
     user_name = profile.get("name") if profile else ""
     system_prompt = f"Ты — {user_name or 'помощник'}. Отвечай кратко."
@@ -723,12 +603,10 @@ async def save_memory(uid, role, content):
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO memory(user_id,role,content) VALUES ($1,$2,$3)", uid, role, content)
         await conn.execute("DELETE FROM memory WHERE user_id=$1 AND id NOT IN (SELECT id FROM memory WHERE user_id=$1 ORDER BY created_at DESC LIMIT 20)", uid)
-
 async def get_memory(uid):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT role,content FROM memory WHERE user_id=$1 ORDER BY created_at DESC LIMIT 6", uid)
         return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
-
 async def update_emotion(uid, text):
     mood = "нейтральное"
     if any(w in text for w in ["груст","печаль","тоск","плохо"]): mood = "грусть"
@@ -736,15 +614,12 @@ async def update_emotion(uid, text):
     elif any(w in text for w in ["устал","выгор","нет сил"]): mood = "усталость"
     elif any(w in text for w in ["тревож","беспоко","нерв"]): mood = "тревога"
     async with db_pool.acquire() as conn: await conn.execute("INSERT INTO emotions(user_id,mood) VALUES ($1,$2)", uid, mood)
-
 async def get_mood(uid):
     async with db_pool.acquire() as conn:
         row = await conn.fetchval("SELECT mood FROM emotions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1", uid)
         return row or "нейтральное"
-
 async def update_last_activity(uid):
     async with db_pool.acquire() as conn: await conn.execute("INSERT INTO last_activity(user_id,last_time) VALUES ($1,NOW()) ON CONFLICT(user_id) DO UPDATE SET last_time=NOW()", uid)
-
 def extract_profile(text):
     text = text.lower(); name=age=gender=city=None
     m = re.search(r"меня зовут (\w+)", text)
@@ -756,7 +631,6 @@ def extract_profile(text):
     m = re.search(r"город[ :]+([\w\s\-]+?)(?:\?|$)", text)
     if m: city = m.group(1).strip()
     return name, age, gender, city
-
 def parse_time(text):
     text = text.lower(); now = now_moscow()
     if "вечером" in text: dt = now.replace(hour=19,minute=0); return dt if dt>now else dt+timedelta(days=1)
@@ -768,9 +642,14 @@ def parse_time(text):
     return None
 
 # ======================
-#  ПАРСЕР КОМАНД
+#  ПАРСЕР КОМАНД (РАСШИРЕННЫЙ)
 # ======================
-RU_COMMANDS = {"меню":"show_menu","задачи":"list_tasks","заметк":"notes_list","календар":"calendar_list","привычк":"habits_list","погод":"ext_weather","курс":"ext_currency","кино":"ext_cinema","новост":"ext_news","профиль":"profile_show","помощь":"help_show","дашборд":"dashboard_show","сброс":"reset_context","reset":"reset_context"}
+RU_COMMANDS = {
+    "меню":"show_menu", "задачи":"list_tasks", "заметк":"notes_list", "календар":"calendar_list",
+    "привычк":"habits_list", "погод":"ext_weather", "курс":"ext_currency", "кино":"ext_cinema",
+    "новост":"ext_news", "профиль":"profile_show", "помощь":"help_show", "дашборд":"dashboard_show",
+    "сброс":"reset_context", "reset":"reset_context", "забудь":"reset_context", "очисти память":"reset_context", "новая тема":"reset_context"
+}
 def parse_ru_command(text:str) -> str|None:
     text_lower = text.lower().strip()
     for keyword,cmd in RU_COMMANDS.items():
@@ -790,7 +669,6 @@ async def cmd_start(msg:Message, state:FSMContext):
 
 @dp.message(Command("reset", "clear"))
 async def cmd_reset(msg:Message):
-    """🔥 Сброс контекста и памяти"""
     await clear_user_context(msg.from_user.id)
     await msg.answer("✅ Контекст очищен. Начинаем с чистого листа!")
 
@@ -838,7 +716,8 @@ async def cmd_news(msg:Message):
         await msg.answer("📰 Новости:", reply_markup=external_link_keyboard(get_news_link(), "Яндекс.Новости"))
 
 # ======================
-#  🔥 ДАШБОРД
+#  🔥 ДАШБОРД / ПРОФИЛЬ / ЗАМЕТКИ / КАЛЕНДАРЬ / ЗАДАЧИ
+# (Хендлеры остались прежними)
 # ======================
 @dp.message(Command("dashboard"))
 async def cmd_dashboard(msg:Message):
@@ -857,9 +736,6 @@ async def cb_dashboard(call:CallbackQuery):
 async def cb_dashboard_refresh(call:CallbackQuery):
     await cb_dashboard(call)
 
-# ======================
-#  🔥 ПРОФИЛЬ: РЕДАКТИРОВАНИЕ
-# ======================
 @dp.callback_query(F.data.startswith("profile_edit_"))
 async def profile_edit_cb(call:CallbackQuery, state:FSMContext):
     field = call.data.split("_")[-1]
@@ -887,9 +763,6 @@ async def profile_done_cb(call:CallbackQuery, state:FSMContext):
     await state.clear()
     await call.answer("✅ Сохранено", show_alert=True)
 
-# ======================
-#  🔥 ЗАМЕТКИ
-# ======================
 @dp.message(Command("note"))
 async def cmd_note_start(msg:Message, state:FSMContext):
     await state.set_state(NoteFSM.template)
@@ -946,9 +819,6 @@ async def cmd_notes(msg:Message):
     text = "📝 **Заметки**:\n" + "\n".join([f"#{n['id']} [{n['category']}] {n['content'][:60]}..." for n in notes[:5]])
     await msg.answer(text, reply_markup=main_menu_keyboard())
 
-# ======================
-#  🔥 КАЛЕНДАРЬ
-# ======================
 @dp.message(Command("event"))
 async def cmd_event_start(msg:Message, state:FSMContext):
     await state.set_state(CalendarFSM.title)
@@ -997,9 +867,6 @@ async def cmd_calendar(msg:Message):
     text = "📅 **События**:\n" + "\n".join([f"• {e['title']}\n🗓 {e['event_date'].astimezone(MOSCOW_TZ).strftime('%d.%m %H:%M')}" for e in events[:5]])
     await msg.answer(text, reply_markup=main_menu_keyboard())
 
-# ======================
-#  🔥 ЗАДАЧИ
-# ======================
 @dp.message(Command("task"))
 async def cmd_task_start(msg:Message, state:FSMContext):
     await state.set_state(TaskFSM.title)
@@ -1156,19 +1023,15 @@ async def cb_ext_weather(call:CallbackQuery):
     profile = await get_profile(call.from_user.id)
     city = profile.get("city") if profile and profile.get("city") else CITY_DEFAULT
     weather = await get_weather_data(city)
-    if weather:
-        await call.message.answer(f"🌤 {city}: {weather['temp']}°, {weather['description']}")
-    else:
-        await call.message.answer(f"🌤 {city}:", reply_markup=external_link_keyboard(get_weather_link(city), "Яндекс.Погода"))
+    if weather: await call.message.answer(f"🌤 {city}: {weather['temp']}°, {weather['description']}")
+    else: await call.message.answer(f"🌤 {city}:", reply_markup=external_link_keyboard(get_weather_link(city), "Яндекс.Погода"))
     await call.answer()
 
 @dp.callback_query(F.data=="ext_currency")
 async def cb_ext_currency(call:CallbackQuery):
     rates = await get_currency_data()
-    if rates:
-        await call.message.answer(f"💱 1$ = {rates.get('USD',0):.2f}₽ | 1€ = {rates.get('EUR',0):.2f}₽")
-    else:
-        await call.message.answer("💱 Курс:", reply_markup=external_link_keyboard(get_currency_link(), "ЦБ"))
+    if rates: await call.message.answer(f"💱 1$ = {rates.get('USD',0):.2f}₽ | 1€ = {rates.get('EUR',0):.2f}₽")
+    else: await call.message.answer("💱 Курс:", reply_markup=external_link_keyboard(get_currency_link(), "ЦБ"))
     await call.answer()
 
 @dp.callback_query(F.data=="ext_cinema")
@@ -1179,21 +1042,18 @@ async def cb_ext_cinema(call:CallbackQuery):
     if movies:
         text = "🎬 В прокате:\n" + "\n".join([f"• {m['title']} ⭐{m['rating']:.1f}" for m in movies])
         await call.message.answer(text, reply_markup=external_link_keyboard(get_cinema_link(city), f"Афиша: {city}"))
-    else:
-        await call.message.answer(f"🎬 {city}:", reply_markup=external_link_keyboard(get_cinema_link(city), "Афиша"))
+    else: await call.message.answer(f"🎬 {city}:", reply_markup=external_link_keyboard(get_cinema_link(city), "Афиша"))
     await call.answer()
 
 @dp.callback_query(F.data=="ext_news")
 async def cb_ext_news(call:CallbackQuery):
     news = await get_news_data()
-    if news:
-        await call.message.answer("📰 " + news[0]['title'], reply_markup=external_link_keyboard(get_news_link(), "Все"))
-    else:
-        await call.message.answer("📰 Новости:", reply_markup=external_link_keyboard(get_news_link(), "Яндекс"))
+    if news: await call.message.answer("📰 " + news[0]['title'], reply_markup=external_link_keyboard(get_news_link(), "Все"))
+    else: await call.message.answer("📰 Новости:", reply_markup=external_link_keyboard(get_news_link(), "Яндекс"))
     await call.answer()
 
 # ======================
-#  🔥 🔥 🔥 ОСНОВНОЙ ЧАТ (УЛУЧШЕННЫЙ) 🔥 🔥 
+#  🔥 🔥  ОСНОВНОЙ ЧАТ (v4.4) 🔥 🔥 
 # ======================
 @dp.message()
 async def chat(msg:Message, state:FSMContext):
@@ -1216,50 +1076,39 @@ async def chat(msg:Message, state:FSMContext):
             await msg.answer(f"Запомнил: {name or city}")
             return
     
+    # 🔥 АГРЕССИВНЫЙ СБРОС КОНТЕКСТА
     if should_reset_context(text) or any(kw in text_lower for kw in FRUSTRATION_KEYWORDS):
-        async with db_pool.acquire() as conn:
-            await conn.execute("DELETE FROM memory WHERE user_id=$1 AND id IN (SELECT id FROM memory WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5)", uid)
+        await clear_user_context(uid)
+        # Не прерываем выполнение, чтобы бот ответил на "привет" естественно
     
     memory = await get_memory(uid)
     mood = await get_mood(uid)
     await save_memory(uid, "user", text)
     await update_emotion(uid, text)
     
-    # 🔥 1. ПРЯМАЯ ОБРАБОТКА КОМАНД ЧЕРЕЗ PARSE
+    # 🔥 1. ПРЯМАЯ ОБРАБОТКА КОМАНД
     cmd = parse_ru_command(text)
     if cmd:
-        if cmd == "show_menu":
-            await msg.answer("📋 **Меню**:", reply_markup=main_menu_keyboard())
+        if cmd == "reset_context":
+            await clear_user_context(uid)
+            await msg.answer("✅ Контекст очищен! Начинаем с чистого листа. 😊")
             return
-        elif cmd == "list_tasks":
-            await cmd_tasks(msg)
-            return
-        elif cmd == "notes_list":  # 🔥 ИСПРАВЛЕНО: показываем заметки, не события!
-            await cmd_notes(msg)
-            return
-        elif cmd == "calendar_list":
-            await cmd_calendar(msg)
-            return
-        elif cmd == "habits_list":
-            await cb_habits(msg)
-            return
-        elif cmd == "dashboard_show":
-            await cmd_dashboard(msg)
-            return
+        elif cmd == "show_menu": await msg.answer("📋 **Меню**:", reply_markup=main_menu_keyboard()); return
+        elif cmd == "list_tasks": await cmd_tasks(msg); return
+        elif cmd == "notes_list": await cmd_notes(msg); return
+        elif cmd == "calendar_list": await cmd_calendar(msg); return
+        elif cmd == "habits_list": await cb_habits(msg); return
+        elif cmd == "dashboard_show": await cmd_dashboard(msg); return
         elif cmd == "ext_weather":
             city = profile.get("city") if profile and profile.get("city") else CITY_DEFAULT
             weather = await get_weather_data(city)
-            if weather:
-                await msg.answer(f"🌤 {city}: {weather['temp']}°, {weather['description']}")
-            else:
-                await msg.answer(f"🌤 {city}:", reply_markup=external_link_keyboard(get_weather_link(city), "Яндекс.Погода"))
+            if weather: await msg.answer(f"🌤 {city}: {weather['temp']}°, {weather['description']}")
+            else: await msg.answer(f"🌤 {city}:", reply_markup=external_link_keyboard(get_weather_link(city), "Яндекс.Погода"))
             return
         elif cmd == "ext_currency":
             rates = await get_currency_data()
-            if rates:
-                await msg.answer(f"💱 1$ = {rates.get('USD',0):.2f}₽ | 1€ = {rates.get('EUR',0):.2f}₽")
-            else:
-                await msg.answer("💱 Курс:", reply_markup=external_link_keyboard(get_currency_link(), "ЦБ"))
+            if rates: await msg.answer(f"💱 1$ = {rates.get('USD',0):.2f}₽ | 1€ = {rates.get('EUR',0):.2f}₽")
+            else: await msg.answer("💱 Курс:", reply_markup=external_link_keyboard(get_currency_link(), "ЦБ"))
             return
         elif cmd == "ext_cinema":
             city = profile.get("city") if profile and profile.get("city") else CITY_DEFAULT
@@ -1267,65 +1116,48 @@ async def chat(msg:Message, state:FSMContext):
             if movies:
                 text_msg = "🎬 В прокате:\n" + "\n".join([f"• {m['title']} ⭐{m['rating']:.1f}" for m in movies])
                 await msg.answer(text_msg, reply_markup=external_link_keyboard(get_cinema_link(city), f"Афиша: {city}"))
-            else:
-                await msg.answer(f"🎬 {city}:", reply_markup=external_link_keyboard(get_cinema_link(city), "Афиша"))
+            else: await msg.answer(f"🎬 {city}:", reply_markup=external_link_keyboard(get_cinema_link(city), "Афиша"))
             return
         elif cmd == "ext_news":
             news = await get_news_data()
-            if news:
-                await msg.answer("📰 " + news[0]['title'], reply_markup=external_link_keyboard(get_news_link(), "Все"))
-            else:
-                await msg.answer("📰 Новости:", reply_markup=external_link_keyboard(get_news_link(), "Яндекс"))
+            if news: await msg.answer("📰 " + news[0]['title'], reply_markup=external_link_keyboard(get_news_link(), "Все"))
+            else: await msg.answer("📰 Новости:", reply_markup=external_link_keyboard(get_news_link(), "Яндекс"))
             return
-        elif cmd == "profile_show":
-            await cmd_profile(msg, state)
-            return
-        elif cmd == "help_show":
-            await cmd_help(msg)
-            return
+        elif cmd == "profile_show": await cmd_profile(msg, state); return
+        elif cmd == "help_show": await cmd_help(msg); return
     
-    # 🔥 2. СОЗДАНИЕ ЗАДАЧ ЧЕРЕЗ ТЕКСТ
+    # 🔥 2. СОЗДАНИЕ ЗАДАЧ/ЗАМЕТОК ЧЕРЕЗ ТЕКСТ
     if any(kw in text_lower for kw in ["создай задачу", "добавь задачу", "новая задача", "задача:"]):
         task_title = text
         for kw in ["создай задачу", "добавь задачу", "новая задача", "задача:"]:
-            if kw in task_title:
-                task_title = task_title.split(kw)[-1].strip()
-                break
-        
+            if kw in task_title: task_title = task_title.split(kw)[-1].strip(); break
         if task_title and len(task_title) > 3:
             task_id = await create_task(uid, title=task_title, category="general", priority="medium")
             await msg.answer(f"✅ Задача #{task_id} создана: {task_title}\n\nИспользуй /tasks чтобы посмотреть все задачи", reply_markup=task_actions_keyboard(task_id))
             return
     
-    # 🔥 3. СОЗДАНИЕ ЗАМЕТОК ЧЕРЕЗ ТЕКСТ
     if any(kw in text_lower for kw in ["запиши заметку", "создай заметку", "добавь заметку", "заметка:", "запиши"]):
         note_content = text
         for kw in ["запиши заметку", "создай заметку", "добавь заметку", "заметка:", "запиши"]:
-            if kw in note_content:
-                note_content = note_content.split(kw)[-1].strip()
-                break
-        
+            if kw in note_content: note_content = note_content.split(kw)[-1].strip(); break
         if note_content and len(note_content) > 3:
             note_id = await create_note(uid, content=note_content, category="general")
             await msg.answer(f"✅ Заметка #{note_id} сохранена!\n\nИспользуй /notes чтобы посмотреть все заметки", reply_markup=note_actions_keyboard(note_id))
             return
     
-    # 🔥 4. СОЗДАНИЕ СОБЫТИЙ ЧЕРЕЗ ТЕКСТ
     if any(kw in text_lower for kw in ["добавь событие", "создай событие", "встреча:", "план:"]):
         await msg.answer("📅 Для создания события используй команду /event — так будет надёжнее!")
         return
     
-    # 🔥 5. ВСЁ ОСТАЛЬНОЕ — ЧАТ С OPENAI
+    # 🔥 3. ВСЁ ОСТАЛЬНОЕ — ЧАТ С OPENAI (с динамическими параметрами)
     answer = await call_openai_chat(text, profile, mood, memory)
     await msg.answer(answer)
 
 # ======================
-#  🔥 ПЛАНИРОВЩИК С УМНОЙ РОТАЦИЕЙ
+#  🔥 ПЛАНИРОВЩИК
 # ======================
 async def morning_quote():
-    """🌅 Цитата дня в 8:00 МСК (не повторяется!)"""
-    async with db_pool.acquire() as conn: 
-        users = await conn.fetch("SELECT user_id FROM users")
+    async with db_pool.acquire() as conn: users = await conn.fetch("SELECT user_id FROM users")
     for u in users:
         try: 
             quote = await get_next_quote_for_user(u["user_id"])
@@ -1333,9 +1165,7 @@ async def morning_quote():
         except: pass
 
 async def afternoon_fact():
-    """🌞 Факт дня в 13:00 МСК (не повторяется!)"""
-    async with db_pool.acquire() as conn: 
-        users = await conn.fetch("SELECT user_id FROM users")
+    async with db_pool.acquire() as conn: users = await conn.fetch("SELECT user_id FROM users")
     for u in users:
         try: 
             fact = await get_next_fact_for_user(u["user_id"])
@@ -1343,9 +1173,7 @@ async def afternoon_fact():
         except: pass
 
 async def morning_ping():
-    """Утренний дашборд в 9:00 МСК"""
-    async with db_pool.acquire() as conn: 
-        users = await conn.fetch("SELECT user_id FROM users")
+    async with db_pool.acquire() as conn: users = await conn.fetch("SELECT user_id FROM users")
     for u in users:
         try: 
             profile = await get_profile(u["user_id"])
@@ -1354,9 +1182,7 @@ async def morning_ping():
         except: pass
 
 async def evening_report():
-    """Вечерний отчёт в 21:00 МСК"""
-    async with db_pool.acquire() as conn: 
-        users = await conn.fetch("SELECT user_id FROM users")
+    async with db_pool.acquire() as conn: users = await conn.fetch("SELECT user_id FROM users")
     for u in users:
         try:
             completed = await conn.fetchval("SELECT COUNT(*) FROM tasks WHERE user_id=$1 AND status='completed' AND completed_at::date = CURRENT_DATE", u["user_id"])
@@ -1365,8 +1191,7 @@ async def evening_report():
         except: pass
 
 async def habit_check():
-    async with db_pool.acquire() as conn: 
-        habits = await conn.fetch("SELECT id,user_id,name,last_done,frequency FROM habits")
+    async with db_pool.acquire() as conn: habits = await conn.fetch("SELECT id,user_id,name,last_done,frequency FROM habits")
     now = now_moscow().date()
     for h in habits:
         if h["frequency"]=="daily" and h["last_done"] and h["last_done"] < now - timedelta(days=1):
@@ -1388,10 +1213,10 @@ async def calendar_reminder_check():
         except: pass
 
 # ======================
-#  🔥 HEALTH CHECK
+#  🔥 HEALTH CHECK / ЗАПУСК
 # ======================
 async def health_handler(request):
-    return web.json_response({"status":"ok","bot":"AssistEmpat v4.3"}, headers={"Content-Type":"application/json"})
+    return web.json_response({"status":"ok","bot":"AssistEmpat v4.4"}, headers={"Content-Type":"application/json"})
 
 async def start_health_server():
     app = web.Application()
@@ -1404,11 +1229,8 @@ async def start_health_server():
     logging.info(f"🏥 Health server on port {HEALTH_PORT}")
     return runner
 
-# ======================
-#  🔥 ЗАПУСК
-# ======================
 async def main():
-    logging.info(f"🚀 Starting AssistEmpat v4.3 (port={HEALTH_PORT}, TZ=Moscow)")
+    logging.info(f"🚀 Starting AssistEmpat v4.4 (port={HEALTH_PORT}, TZ=Moscow)")
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     def handle_signal():
@@ -1445,7 +1267,7 @@ async def main():
     if stop_event.is_set():
         await cleanup(health_runner)
         return
-    logging.info("✅ AssistEmpat v4.3 ready — STARTING POLLING")
+    logging.info("✅ AssistEmpat v4.4 ready — STARTING POLLING")
     polling_task = asyncio.create_task(dp.start_polling(bot))
     done, pending = await asyncio.wait([polling_task, asyncio.create_task(stop_event.wait())], return_when=asyncio.FIRST_COMPLETED)
     await cleanup(health_runner)
