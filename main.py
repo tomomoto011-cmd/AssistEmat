@@ -2635,25 +2635,55 @@ async def calendar_reminder_check():
         except:
             pass
 
-# ======================
-#  🔥 HEALTH CHECK / ЗАПУСК
+## ======================
+#  🔥 HEALTH CHECK / ЗАПУСК (исправлено)
 # ======================
 async def health_handler(request):
-    return web.json_response({"status":"ok","bot":"AssistEmpat v4.9"}, headers={"Content-Type":"application/json"})
+    """Health endpoint с проверкой готовности"""
+    status = {
+        "status": "ok" if db_pool and bot.session else "starting",
+        "bot": "AssistEmpat v4.9",
+        "db": "connected" if db_pool else "connecting",
+        "polling": "running" if dp and hasattr(dp, '_running') else "stopped",
+        "timestamp": now_moscow().isoformat()
+    }
+    status_code = 200 if status["status"] == "ok" else 503
+    return web.json_response(status, status=status_code, headers={"Content-Type": "application/json"})
 
 async def start_health_server():
+    """Поднимает health-сервер ДО начала polling"""
     app = web.Application()
     app.router.add_get('/health', health_handler)
-    app.router.add_get('/', health_handler)
+    app.router.add_get('/', health_handler)  # корень тоже отвечает
+    
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', HEALTH_PORT)
-    await site.start()
-    logging.info(f"🏥 Health server on port {HEALTH_PORT}")
-    return runner
+    
+    # Пробуем занять порт с повторами
+    for attempt in range(3):
+        try:
+            site = web.TCPSite(runner, '0.0.0.0', HEALTH_PORT)
+            await site.start()
+            logging.info(f"🏥 Health server started on port {HEALTH_PORT}")
+            return runner
+        except OSError as e:
+            if "Address already in use" in str(e):
+                logging.warning(f"⚠️ Port {HEALTH_PORT} busy, retry {attempt+1}/3...")
+                await asyncio.sleep(1)
+            else:
+                raise
+    raise RuntimeError(f"❌ Could not bind to port {HEALTH_PORT} after 3 attempts")
 
 async def main():
     logging.info(f"🚀 Starting AssistEmpat v4.9 (port={HEALTH_PORT}, TZ=Moscow)")
+    
+    # 🔥 1. Валидация переменных окружения
+    required_vars = ["BOT_TOKEN", "DATABASE_URL"]
+    missing = [v for v in required_vars if not os.getenv(v)]
+    if missing:
+        logging.error(f"❌ Missing required env vars: {missing}")
+        return  # Выходим чисто, чтобы оркестратор увидел ошибку
+    
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     
@@ -2664,25 +2694,32 @@ async def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, handle_signal)
     
-    try:
-        await init_db()
-        logging.info("✅ DB initialized")
-    except Exception as e:
-        logging.error(f"❌ DB init failed: {e}")
-        return
-    
+    # 🔥 2. Health server запускаем ПЕРВЫМ (до БД!)
     health_runner = None
     try:
         health_runner = await start_health_server()
-        await asyncio.sleep(1.0)
-        logging.info("✅ Health server ready")
     except Exception as e:
-        logging.warning(f"⚠️ Health server failed: {e}")
+        logging.error(f"❌ Health server failed: {e}")
+        return
+    
+    # 🔥 3. Инициализация БД с таймаутом
+    try:
+        await asyncio.wait_for(init_db(), timeout=30.0)
+        logging.info("✅ DB initialized")
+    except asyncio.TimeoutError:
+        logging.error("❌ DB init timeout (30s)")
+        await cleanup(health_runner)
+        return
+    except Exception as e:
+        logging.error(f"❌ DB init failed: {e}")
+        await cleanup(health_runner)
+        return
     
     if stop_event.is_set():
         await cleanup(health_runner)
         return
     
+    # 🔥 4. Планировщик
     scheduler.start()
     scheduler.add_job(morning_quote, "cron", hour=8, minute=0)
     scheduler.add_job(afternoon_fact, "cron", hour=13, minute=0)
@@ -2693,50 +2730,36 @@ async def main():
     scheduler.add_job(calendar_reminder_check, "interval", minutes=30)
     logging.info("✅ Scheduler started (Moscow TZ)")
     
+    # 🔥 5. Webhook cleanup
     await bot.delete_webhook(drop_pending_updates=True)
     
     if stop_event.is_set():
         await cleanup(health_runner)
         return
     
+    # 🔥 6. START POLLING (только после всех проверок)
     logging.info("✅ AssistEmpat v4.9 ready — STARTING POLLING")
-    polling_task = asyncio.create_task(dp.start_polling(bot))
-    done, pending = await asyncio.wait([polling_task, asyncio.create_task(stop_event.wait())], return_when=asyncio.FIRST_COMPLETED)
-    await cleanup(health_runner)
-    for task in pending:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    
+    try:
+        await dp.start_polling(bot)
+    except asyncio.CancelledError:
+        logging.info("🔄 Polling cancelled")
+    finally:
+        await cleanup(health_runner)
 
 async def cleanup(health_runner=None):
     logging.info("👋 Cleaning up...")
+    if scheduler.running:
+        try: scheduler.shutdown(wait=False)
+        except: pass
     if db_pool:
-        try:
-            await db_pool.close()
-        except:
-            pass
+        try: await db_pool.close()
+        except: pass
     if bot.session:
-        try:
-            await bot.session.close()
-        except:
-            pass
+        try: await bot.session.close()
+        except: pass
     if health_runner:
-        try:
-            await health_runner.cleanup()
-        except:
-            pass
-    try:
-        scheduler.shutdown(wait=False)
-    except:
-        pass
+        try: await health_runner.cleanup()
+        except: pass
     logging.info("✅ Cleanup complete")
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logging.info("👋 Stopped by user")
-    except Exception as e:
-        logging.error(f"💥 Fatal error: {e}")
+    
