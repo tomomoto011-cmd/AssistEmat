@@ -1,11 +1,10 @@
 # =========================================================
-#  ASSISTEMPAT BOT v4.5-final (All Fixes Applied)
-#  Исправления:
-#  1. ✅ Функция clear_user_context определена
-#  2. ✅ "меню" убрано из HEALTH_EXIT_TRIGGERS
-#  3. ✅ Прямая проверка на "меню" в chat()
-#  4. ✅ Курс валют через /currency (кнопка → Здоровье)
-#  5. ✅ Режим здоровья с изолированным контекстом
+#  ASSISTEMPAT BOT v4.6 (Psycho Mode + Adaptive Tone)
+#  Новое:
+#  1. 🧠 Режим психоанализа с адаптивным тоном
+#  2. 🔥 Авто-детекция стиля: эмпатия/аналитика/жёсткий/сарказм
+#  3. 📊 Изолированный контекст + авто-сброс
+#  4. 👤 Профиль доступен через /profile или "мой профиль"
 #  Часовой пояс: Москва (UTC+3)
 # =========================================================
 
@@ -40,9 +39,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 #  🔥 ЧАСОВОЙ ПОЯС: МОСКВА
 # ======================
 MOSCOW_TZ = timezone(timedelta(hours=3))
-
-def now_moscow() -> datetime:
-    return datetime.now(MOSCOW_TZ)
+def now_moscow() -> datetime: return datetime.now(MOSCOW_TZ)
 
 # ======================
 #  🔥 ЦИТАТЫ И ФАКТЫ
@@ -99,10 +96,7 @@ async def get_next_quote_for_user(uid: int) -> str:
         last = row if row is not None else -1
         nxt = (last + 1) % len(QUOTES_RU)
         q = QUOTES_RU[nxt]
-        await conn.execute(
-            "INSERT INTO profile(user_id, last_quote_index) VALUES ($1, $2) ON CONFLICT(user_id) DO UPDATE SET last_quote_index = $2",
-            uid, nxt
-        )
+        await conn.execute("INSERT INTO profile(user_id, last_quote_index) VALUES ($1, $2) ON CONFLICT(user_id) DO UPDATE SET last_quote_index = $2", uid, nxt)
         return q
 
 async def get_next_fact_for_user(uid: int) -> str:
@@ -111,10 +105,7 @@ async def get_next_fact_for_user(uid: int) -> str:
         last = row if row is not None else -1
         nxt = (last + 1) % len(FACTS_RU)
         f = FACTS_RU[nxt]
-        await conn.execute(
-            "INSERT INTO profile(user_id, last_fact_index) VALUES ($1, $2) ON CONFLICT(user_id) DO UPDATE SET last_fact_index = $2",
-            uid, nxt
-        )
+        await conn.execute("INSERT INTO profile(user_id, last_fact_index) VALUES ($1, $2) ON CONFLICT(user_id) DO UPDATE SET last_fact_index = $2", uid, nxt)
         return f
 
 # ======================
@@ -127,7 +118,6 @@ QWEN_API_KEY = os.getenv("QWEN_API_KEY")
 CITY_DEFAULT = os.getenv("CITY_DEFAULT", "Москва")
 ALLOWED_USERS = os.getenv("ALLOWED_USERS", "")
 HEALTH_PORT = int(os.getenv("PORT", os.getenv("RAILWAY_PUBLIC_PORT", 8080)))
-
 OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 EXCHANGERATE_API_KEY = os.getenv("EXCHANGERATE_API_KEY")
@@ -141,22 +131,14 @@ db_pool = None
 # ======================
 #  🔥 УМНОЕ ИСПРАВЛЕНИЕ РАСКЛАДКИ
 # ======================
-LAYOUT_MAP = {
-    'q':'й','w':'ц','e':'у','r':'к','t':'е','y':'н','u':'г','i':'ш','o':'щ','p':'з','[':'х',']':'ъ',
-    'a':'ф','s':'ы','d':'в','f':'а','g':'п','h':'р','j':'о','k':'л','l':'д',';':'ж',"'":'э',
-    'z':'я','x':'ч','c':'с','v':'м','b':'и','n':'т','m':'ь',',':'б','.':'ю','/':'.'
-}
-
+LAYOUT_MAP = {'q':'й','w':'ц','e':'у','r':'к','t':'е','y':'н','u':'г','i':'ш','o':'щ','p':'з','[':'х',']':'ъ','a':'ф','s':'ы','d':'в','f':'а','g':'п','h':'р','j':'о','k':'л','l':'д',';':'ж',"'":'э','z':'я','x':'ч','c':'с','v':'м','b':'и','n':'т','m':'ь',',':'б','.':'ю','/':'.'}
 def fix_layout(text: str) -> str:
-    if not text or len(text) < 4:
-        return text
-    safe = ['меню', 'инлайн', 'задача', 'привычк', 'напомн', 'погод', 'кино', 'новост', 'курс', 'профиль', 'помощь', 'статистик', 'заметк', 'календар', 'дашборд', 'сброс', 'reset', 'здоровье']
-    if any(s in text.lower() for s in safe):
-        return text
+    if not text or len(text) < 4: return text
+    safe = ['меню', 'инлайн', 'задача', 'привычк', 'напомн', 'погод', 'кино', 'новост', 'курс', 'профиль', 'помощь', 'статистик', 'заметк', 'календар', 'дашборд', 'сброс', 'reset', 'здоровье', 'психо']
+    if any(s in text.lower() for s in safe): return text
     if text.isascii() and text.isalpha():
         c = ''.join(LAYOUT_MAP.get(ch.lower(), ch) for ch in text)
-        if any('\u0400' <= ch <= '\u04FF' for ch in c):
-            return c
+        if any('\u0400' <= ch <= '\u04FF' for ch in c): return c
     return text
 
 # ======================
@@ -164,24 +146,29 @@ def fix_layout(text: str) -> str:
 # ======================
 CRISIS_KEYWORDS = ["суицид", "умер", "не хочу жить", "убить себя", "паник", "не могу дышать", "сердце", "давление"]
 FRUSTRATION_KEYWORDS = ["скотина", "бесчувственный", "ты тупой", "опять", "достал", "хватит", "бесит"]
-RESET_KEYWORDS = ["привет", "здравствуй", "отбой", "стоп", "новое", "другое", "пока"]  # 🔥 "меню" убрано
-# 🔥 "меню" убрано из триггеров выхода!
+RESET_KEYWORDS = ["привет", "здравствуй", "отбой", "стоп", "новое", "другое", "пока"]
 HEALTH_EXIT_TRIGGERS = ["спасибо", "благодарю", "пока", "до свидания", "выход", "назад", "выход из режима", "хватит здоровья"]
+PSYCHO_EXIT_TRIGGERS = ["спасибо", "благодарю", "пока", "до свидания", "выход", "назад", "достаточно", "закончили", "хватит", "всё"]
 
 def is_crisis(text: str) -> tuple[bool, str]:
     t = text.lower()
-    if any(w in t for w in ["суицид", "умер", "не хочу жить", "убить себя"]):
-        return True, "critical"
-    if any(w in t for w in ["паник", "не могу дышать", "сердце", "давление"]):
-        return True, "medical_emergency"
+    if any(w in t for w in ["суицид", "умер", "не хочу жить", "убить себя"]): return True, "critical"
+    if any(w in t for w in ["паник", "не могу дышать", "сердце", "давление"]): return True, "medical_emergency"
     return False, ""
 
 def should_reset_context(text: str) -> bool:
     t = text.lower().strip()
-    if any(k in t for k in RESET_KEYWORDS):
-        return True
-    if t.endswith("?") and len(t.split()) < 4:
-        return True
+    if any(k in t for k in RESET_KEYWORDS): return True
+    if t.endswith("?") and len(t.split()) < 4: return True
+    return False
+
+def is_topic_change(text: str, current_mode: str) -> bool:
+    """Определяет очевидную смену темы для выхода из спец-режимов"""
+    t = text.lower()
+    util_keywords = ["задача", "заметк", "календар", "погод", "курс", "кино", "новост", "дашборд", "меню"]
+    if any(k in t for k in util_keywords): return True
+    if current_mode == "psycho" and any(k in t for k in ["давление", "голова", "сон", "питание", "здоров"]): return True
+    if current_mode == "health" and any(k in t for k in ["чувствую", "эмоц", "отношен", "мысль", "тревож"]): return True
     return False
 
 # ======================
@@ -214,7 +201,7 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS profile(
             user_id BIGINT PRIMARY KEY, name TEXT, age INTEGER, gender TEXT, city TEXT DEFAULT 'Москва',
             last_quote_index INTEGER DEFAULT 0, last_fact_index INTEGER DEFAULT 0, mode TEXT DEFAULT 'general',
-            health_context TEXT DEFAULT '', created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW()
+            health_context TEXT DEFAULT '', psycho_context TEXT DEFAULT '', created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW()
         );""")
         
         migrations = [
@@ -244,12 +231,11 @@ async def init_db():
             "ALTER TABLE profile ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()",
             "ALTER TABLE profile ADD COLUMN IF NOT EXISTS mode TEXT DEFAULT 'general'",
             "ALTER TABLE profile ADD COLUMN IF NOT EXISTS health_context TEXT DEFAULT ''",
+            "ALTER TABLE profile ADD COLUMN IF NOT EXISTS psycho_context TEXT DEFAULT ''",
         ]
         for sql in migrations:
-            try:
-                await conn.execute(sql)
-            except:
-                pass
+            try: await conn.execute(sql)
+            except: pass
             
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_memory_user ON memory(user_id, created_at DESC)",
@@ -266,17 +252,14 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_calendar_category ON calendar_events(user_id, category)",
         ]
         for sql in indexes:
-            try:
-                await conn.execute(sql)
-            except:
-                pass
-    logging.info("✅ PostgreSQL initialized + v4.5-final features")
+            try: await conn.execute(sql)
+            except: pass
+    logging.info("✅ PostgreSQL initialized + v4.6 features")
 
 # ======================
-#  🔥 ОЧИСТКА КОНТЕКСТА (✅ ДОБАВЛЕНА)
+#  🔥 ОЧИСТКА КОНТЕКСТА
 # ======================
 async def clear_user_context(uid: int):
-    """Полная очистка памяти и контекста пользователя"""
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM memory WHERE user_id=$1", uid)
         await conn.execute("DELETE FROM emotions WHERE user_id=$1", uid)
@@ -284,11 +267,11 @@ async def clear_user_context(uid: int):
     logging.info(f"🗑 Context cleared for user {uid}")
 
 # ======================
-#  🔥 УПРАВЛЕНИЕ РЕЖИМОМ ЗДОРОВЬЯ
+#  🔥 УПРАВЛЕНИЕ РЕЖИМАМИ
 # ======================
-async def set_user_mode(uid: int, mode: str, health_ctx: str = ""):
+async def set_user_mode(uid: int, mode: str, health_ctx: str = "", psycho_ctx: str = ""):
     async with db_pool.acquire() as conn:
-        await conn.execute("UPDATE profile SET mode=$1, health_context=$2 WHERE user_id=$3", mode, health_ctx, uid)
+        await conn.execute("UPDATE profile SET mode=$1, health_context=$2, psycho_context=$3 WHERE user_id=$4", mode, health_ctx, psycho_ctx, uid)
 
 async def get_health_context(uid: int) -> list:
     async with db_pool.acquire() as conn:
@@ -299,17 +282,24 @@ async def save_health_context(uid: int, ctx: list):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE profile SET health_context=$1 WHERE user_id=$2", json.dumps(ctx[-5:]), uid)
 
+async def get_psycho_context(uid: int) -> list:
+    async with db_pool.acquire() as conn:
+        raw = await conn.fetchval("SELECT psycho_context FROM profile WHERE user_id=$1", uid)
+        return json.loads(raw) if raw else []
+
+async def save_psycho_context(uid: int, ctx: list):
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE profile SET psycho_context=$1 WHERE user_id=$2", json.dumps(ctx[-8:]), uid)
+
 # ======================
 #  🔥 ANTI-LOOP
 # ======================
 async def is_duplicate_response(uid: int, new_text: str) -> bool:
-    if not new_text or len(new_text.strip()) < 5:
-        return False
+    if not new_text or len(new_text.strip()) < 5: return False
     h = hashlib.md5(new_text.strip().lower().encode()).hexdigest()
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT content_hash FROM response_log WHERE user_id=$1 ORDER BY created_at DESC LIMIT 3", uid)
-        if h in [r["content_hash"] for r in rows]:
-            return True
+        if h in [r["content_hash"] for r in rows]: return True
         await conn.execute("INSERT INTO response_log(user_id, content_hash) VALUES ($1, $2)", uid, h)
         await conn.execute("DELETE FROM response_log WHERE user_id=$1 AND id NOT IN (SELECT id FROM response_log WHERE user_id=$1 ORDER BY created_at DESC LIMIT 20)", uid)
     return False
@@ -318,81 +308,57 @@ async def is_duplicate_response(uid: int, new_text: str) -> bool:
 #  🔥 ВНЕШНИЕ ДАННЫЕ
 # ======================
 async def get_weather_data(city: str) -> dict | None:
-    if not OPENWEATHER_API_KEY:
-        return None
+    if not OPENWEATHER_API_KEY: return None
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get("https://api.openweathermap.org/data/2.5/weather", params={"q": city, "appid": OPENWEATHER_API_KEY, "units": "metric", "lang": "ru"})
             r.raise_for_status()
             d = r.json()
             return {"temp": d["main"]["temp"], "feels_like": d["main"]["feels_like"], "description": d["weather"][0]["description"], "humidity": d["main"]["humidity"], "wind": d["wind"]["speed"]}
-    except:
-        return None
-
-def get_weather_link(city: str) -> str:
-    return f"https://yandex.ru/pogoda/{urllib.parse.quote(city)}"
-
+    except: return None
+def get_weather_link(city: str) -> str: return f"https://yandex.ru/pogoda/{urllib.parse.quote(city)}"
 async def get_currency_data(base="RUB") -> dict | None:
-    if not EXCHANGERATE_API_KEY:
-        return None
+    if not EXCHANGERATE_API_KEY: return None
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get(f"https://v6.exchangerate-api.com/v6/{EXCHANGERATE_API_KEY}/latest/{base}")
             r.raise_for_status()
             return r.json().get("conversion_rates", {})
-    except:
-        return None
-
-def get_currency_link() -> str:
-    return "https://www.cbr.ru/currency_base/daily/"
-
+    except: return None
+def get_currency_link() -> str: return "https://www.cbr.ru/currency_base/daily/"
 async def get_cinema_data(city: str) -> list | None:
-    if not TMDB_API_KEY:
-        return None
+    if not TMDB_API_KEY: return None
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get("https://api.themoviedb.org/3/movie/now_playing", params={"api_key": TMDB_API_KEY, "language": "ru-RU", "page": 1})
             r.raise_for_status()
             d = r.json()
             return [{"title": m["title"], "rating": m.get("vote_average", 0)} for m in d.get("results", [])[:5]]
-    except:
-        return None
-
-def get_cinema_link(city: str = "Москва") -> str:
-    return f"https://afisha.yandex.ru/{urllib.parse.quote(city)}/cinema/"
-
+    except: return None
+def get_cinema_link(city: str = "Москва") -> str: return f"https://afisha.yandex.ru/{urllib.parse.quote(city)}/cinema/"
 async def get_news_data() -> list | None:
-    if not NEWSAPI_KEY:
-        return None
+    if not NEWSAPI_KEY: return None
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get("https://newsapi.org/v2/top-headlines", params={"apiKey": NEWSAPI_KEY, "country": "ru", "language": "ru", "pageSize": 5})
             r.raise_for_status()
             d = r.json()
             return [{"title": a["title"], "url": a["url"]} for a in d.get("articles", [])[:5]]
-    except:
-        return None
-
-def get_news_link() -> str:
-    return "https://news.yandex.ru/"
+    except: return None
+def get_news_link() -> str: return "https://news.yandex.ru/"
 
 # ======================
 #  🔥 ЗАДАЧИ / ЗАМЕТКИ / КАЛЕНДАРЬ / ПРИВЫЧКИ / ПРОФИЛЬ / ДАШБОРД
-# (Функции без изменений — сокращено для читаемости)
 # ======================
 async def create_task(uid, title, description=None, priority="medium", due_date=None, category="general", tags=None, parent_id=None, recurrence=None, attachments=None, checklist=None):
     async with db_pool.acquire() as conn:
-        return await conn.fetchval(
-            "INSERT INTO tasks(user_id, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, checklist) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id",
-            uid, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, json.dumps(checklist) if checklist else '[]'
-        )
+        return await conn.fetchval("INSERT INTO tasks(user_id, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, checklist) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id", uid, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, json.dumps(checklist) if checklist else '[]')
 
 async def get_tasks(uid, status="pending", category=None, parent_id=None, due_date_range=None):
     async with db_pool.acquire() as conn:
         query = "SELECT id, title, description, priority, due_date, category, tags, parent_id, recurrence, attachments, checklist, created_at FROM tasks WHERE user_id=$1 AND status=$2"
         params = [uid, status]
-        if category:
-            query += " AND category=$3"; params.append(category)
+        if category: query += " AND category=$3"; params.append(category)
         if parent_id is not None:
             query += " AND parent_id=$3" if not category else " AND parent_id=$4"; params.append(parent_id)
         if due_date_range:
@@ -404,60 +370,42 @@ async def get_tasks(uid, status="pending", category=None, parent_id=None, due_da
 async def complete_task(uid, task_id):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE tasks SET status='completed', completed_at=NOW() WHERE id=$1 AND user_id=$2", task_id, uid)
-
 async def delete_task(uid, task_id):
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM tasks WHERE id=$1 AND user_id=$2", task_id, uid)
-
 async def get_task_stats(uid):
     async with db_pool.acquire() as conn:
-        return await conn.fetchrow(
-            "SELECT COUNT(*) FILTER (WHERE status='pending') as pending, COUNT(*) FILTER (WHERE status='completed') as completed, COUNT(*) FILTER (WHERE category='work') as work, COUNT(*) FILTER (WHERE category='personal') as personal, COUNT(*) FILTER (WHERE category='shopping') as shopping FROM tasks WHERE user_id=$1",
-            uid
-        )
-
+        return await conn.fetchrow("SELECT COUNT(*) FILTER (WHERE status='pending') as pending, COUNT(*) FILTER (WHERE status='completed') as completed, COUNT(*) FILTER (WHERE category='work') as work, COUNT(*) FILTER (WHERE category='personal') as personal, COUNT(*) FILTER (WHERE category='shopping') as shopping FROM tasks WHERE user_id=$1", uid)
 async def get_subtasks(uid, parent_id):
     async with db_pool.acquire() as conn:
         return await conn.fetch("SELECT id, title, status, priority FROM tasks WHERE user_id=$1 AND parent_id=$2 ORDER BY created_at", uid, parent_id)
 
 NOTE_TEMPLATES = {"shopping": "🛒 Список покупок:\n- \n- \n- ", "ideas": "💡 Идеи:\n• \n• \n• ", "contacts": "📞 Контакты:\nИмя: \nТелефон: \nEmail: ", "meeting": "🤝 Встреча:\nДата: \nУчастники: \nПовестка: ", "todo": "✅ To-Do:\n[ ] \n[ ] \n[ ] "}
-
 async def create_note(uid, content, tags=None, category="general"):
     async with db_pool.acquire() as conn:
         return await conn.fetchval("INSERT INTO notes(user_id, content, tags, category) VALUES ($1, $2, $3, $4) RETURNING id", uid, content, tags, category)
-
 async def get_notes(uid, limit=10, search=None, category=None):
     async with db_pool.acquire() as conn:
         query = "SELECT id, content, tags, category, created_at FROM notes WHERE user_id=$1"
         params = [uid]
-        if search:
-            query += " AND (content ILIKE $2 OR tags::text ILIKE $2)"; params.append(f"%{search}%")
-        if category:
-            query += " AND category=$2" if not search else " AND category=$3"; params.append(category)
+        if search: query += " AND (content ILIKE $2 OR tags::text ILIKE $2)"; params.append(f"%{search}%")
+        if category: query += " AND category=$2" if not search else " AND category=$3"; params.append(category)
         query += f" ORDER BY created_at DESC LIMIT ${len(params)+1}"; params.append(limit)
         return await conn.fetch(query, *params)
-
 async def delete_note(uid, note_id):
     async with db_pool.acquire() as conn:
         await conn.execute("DELETE FROM notes WHERE id=$1 AND user_id=$2", note_id, uid)
 
 async def create_calendar_event(uid, title, description, event_date, reminder_before=None, recurrence=None, category="general"):
     async with db_pool.acquire() as conn:
-        return await conn.fetchval(
-            "INSERT INTO calendar_events(user_id, title, description, event_date, reminder_before, recurrence, category) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id",
-            uid, title, description, event_date, reminder_before, recurrence, category
-        )
-
+        return await conn.fetchval("INSERT INTO calendar_events(user_id, title, description, event_date, reminder_before, recurrence, category) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id", uid, title, description, event_date, reminder_before, recurrence, category)
 async def get_calendar_events(uid, from_date=None, to_date=None, category=None, limit=10):
     async with db_pool.acquire() as conn:
         query = "SELECT id, title, description, event_date, reminder_before, recurrence, category FROM calendar_events WHERE user_id=$1"
         params = [uid]
-        if from_date:
-            query += " AND event_date >= $2"; params.append(from_date)
-        if to_date:
-            query += " AND event_date <= $3" if from_date else " AND event_date <= $2"; params.append(to_date if from_date else to_date)
-        if category:
-            query += f" AND category=${len(params)+1}"; params.append(category)
+        if from_date: query += " AND event_date >= $2"; params.append(from_date)
+        if to_date: query += " AND event_date <= $3" if from_date else " AND event_date <= $2"; params.append(to_date if from_date else to_date)
+        if category: query += f" AND category=${len(params)+1}"; params.append(category)
         query += f" ORDER BY event_date ASC LIMIT ${len(params)+1}"; params.append(limit)
         return await conn.fetch(query, *params)
 
@@ -466,19 +414,13 @@ async def create_habit(uid, name, frequency="daily", target_per_week=7):
         if not await conn.fetchval("SELECT id FROM habits WHERE user_id=$1 AND name=$2", uid, name):
             return await conn.fetchval("INSERT INTO habits(user_id, name, frequency, target_per_week) VALUES ($1,$2,$3,$4) RETURNING id", uid, name, frequency, target_per_week)
         return None
-
 async def get_habits(uid):
     async with db_pool.acquire() as conn:
         return await conn.fetch("SELECT id, name, streak, last_done, frequency, target_per_week FROM habits WHERE user_id=$1", uid)
-
 async def complete_habit(uid, habit_id):
     async with db_pool.acquire() as conn:
         today = now_moscow().date()
-        await conn.execute(
-            "UPDATE habits SET streak = CASE WHEN last_done = $2 THEN streak ELSE streak + 1 END, last_done = $2 WHERE id=$1 AND user_id=$3",
-            habit_id, today, uid
-        )
-
+        await conn.execute("UPDATE habits SET streak = CASE WHEN last_done = $2 THEN streak ELSE streak + 1 END, last_done = $2 WHERE id=$1 AND user_id=$3", habit_id, today, uid)
 async def get_habits_progress(uid):
     async with db_pool.acquire() as conn:
         habits = await conn.fetch("SELECT id, name, frequency, target_per_week, last_done FROM habits WHERE user_id=$1", uid)
@@ -494,35 +436,17 @@ async def get_profile(uid):
     async with db_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT name, age, gender, city, mode FROM profile WHERE user_id=$1", uid)
         return dict(row) if row else None
-
 async def save_profile(uid, name=None, age=None, gender=None, city=None):
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO profile(user_id, name, age, gender, city) VALUES ($1, $2, $3, $4, $5) ON CONFLICT(user_id) DO UPDATE SET name = COALESCE($2, profile.name), age = COALESCE($3, profile.age), gender = COALESCE($4, profile.gender), city = COALESCE($5, profile.city), updated_at = NOW()",
-            uid, name, age, gender, city
-        )
+        await conn.execute("INSERT INTO profile(user_id, name, age, gender, city) VALUES ($1, $2, $3, $4, $5) ON CONFLICT(user_id) DO UPDATE SET name = COALESCE($2, profile.name), age = COALESCE($3, profile.age), gender = COALESCE($4, profile.gender), city = COALESCE($5, profile.city), updated_at = NOW()", uid, name, age, gender, city)
 
 async def get_dashboard_data(uid: int, profile: dict) -> dict:
     city = profile.get("city", CITY_DEFAULT) if profile else CITY_DEFAULT
     now = now_moscow()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
-    weather, tasks, events, habits_prog = await asyncio.gather(
-        get_weather_data(city),
-        get_tasks(uid, status="pending", due_date_range=(today_start, today_end)),
-        get_calendar_events(uid, from_date=now, to_date=now+timedelta(hours=12)),
-        get_habits_progress(uid),
-        return_exceptions=True
-    )
-    return {
-        "weather": weather if not isinstance(weather, Exception) else None,
-        "city": city,
-        "tasks_today": tasks if not isinstance(tasks, Exception) else [],
-        "events_12h": events if not isinstance(events, Exception) else [],
-        "habits_progress": habits_prog if not isinstance(habits_prog, Exception) else [],
-        "stats": await get_task_stats(uid),
-        "time": now.strftime("%H:%M")
-    }
+    weather, tasks, events, habits_prog = await asyncio.gather(get_weather_data(city), get_tasks(uid, status="pending", due_date_range=(today_start, today_end)), get_calendar_events(uid, from_date=now, to_date=now+timedelta(hours=12)), get_habits_progress(uid), return_exceptions=True)
+    return {"weather": weather if not isinstance(weather, Exception) else None, "city": city, "tasks_today": tasks if not isinstance(tasks, Exception) else [], "events_12h": events if not isinstance(events, Exception) else [], "habits_progress": habits_prog if not isinstance(habits_prog, Exception) else [], "stats": await get_task_stats(uid), "time": now.strftime("%H:%M")}
 
 def format_dashboard(data: dict) -> str:
     lines = [f"📊 **Дашборд** • {data['time']}"]
@@ -553,7 +477,7 @@ def main_menu_keyboard():
         [InlineKeyboardButton(text="📋 Задачи", callback_data="tasks_list"), InlineKeyboardButton(text="📝 Заметки", callback_data="notes_list")],
         [InlineKeyboardButton(text="🔁 Привычки", callback_data="habits_list"), InlineKeyboardButton(text="📅 Календарь", callback_data="calendar_list")],
         [InlineKeyboardButton(text="⏰ Напомнить", callback_data="reminders_list"), InlineKeyboardButton(text="📊 Дашборд", callback_data="dashboard_show")],
-        [InlineKeyboardButton(text="🌤 Погода", callback_data="ext_weather"), InlineKeyboardButton(text="🩺 Здоровье", callback_data="ext_health")],
+        [InlineKeyboardButton(text="🌤 Погода", callback_data="ext_weather"), InlineKeyboardButton(text="🧠 Психоанализ", callback_data="ext_psycho")],
         [InlineKeyboardButton(text="🎬 Афиша", callback_data="ext_cinema"), InlineKeyboardButton(text="📰 Новости", callback_data="ext_news")],
         [InlineKeyboardButton(text="👤 Профиль", callback_data="profile_show"), InlineKeyboardButton(text="❓ Помощь", callback_data="help_show")],
     ])
@@ -597,10 +521,8 @@ def note_template_keyboard():
 
 def task_actions_keyboard(task_id, has_subtasks=False, has_checklist=False):
     buttons = [[InlineKeyboardButton(text="✅ Выполнить", callback_data=f"task_complete_{task_id}")]]
-    if has_subtasks:
-        buttons.append([InlineKeyboardButton(text="📝 Подзадачи", callback_data=f"task_subtasks_{task_id}")])
-    if has_checklist:
-        buttons.append([InlineKeyboardButton(text="📋 Чек-лист", callback_data=f"task_checklist_{task_id}")])
+    if has_subtasks: buttons.append([InlineKeyboardButton(text="📝 Подзадачи", callback_data=f"task_subtasks_{task_id}")])
+    if has_checklist: buttons.append([InlineKeyboardButton(text="📋 Чек-лист", callback_data=f"task_checklist_{task_id}")])
     buttons.append([InlineKeyboardButton(text="🗑 Удалить", callback_data=f"task_delete_{task_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -624,11 +546,10 @@ class CalendarFSM(StatesGroup): title=State(); description=State(); event_date=S
 class ProfileEditFSM(StatesGroup): field=State(); value=State()
 
 # ======================
-#  🔥 AI: ОБЩИЙ ЧАТ + ЗДОРОВЬЕ
+#  🔥 AI: ОБЩИЙ ЧАТ
 # ======================
 async def call_openai_chat(user_text: str, profile: dict = None, mood: str = "нейтральное", memory: list = None):
-    if not OPENROUTER_API_KEY:
-        return await call_qwen_fallback(user_text, profile, mood, memory)
+    if not OPENROUTER_API_KEY: return await call_qwen_fallback(user_text, profile, mood, memory)
     user_name = profile.get("name") if profile else ""
     city = profile.get("city", CITY_DEFAULT) if profile else CITY_DEFAULT
     is_short = any(k in user_text.lower() for k in ["шутк", "анекдот", "прикол", "факт", "коротко", "в двух словах"])
@@ -651,9 +572,11 @@ async def call_openai_chat(user_text: str, profile: dict = None, mood: str = "н
         logging.error(f"OpenAI error: {e}")
         return await call_qwen_fallback(user_text, profile, mood, memory)
 
+# ======================
+#  🔥 AI: РЕЖИМ ЗДОРОВЬЯ
+# ======================
 async def call_health_ai(user_text: str, profile: dict, health_mem: list):
-    if not OPENROUTER_API_KEY:
-        return await call_qwen_fallback(user_text, profile, "нейтральное", health_mem)
+    if not OPENROUTER_API_KEY: return await call_qwen_fallback(user_text, profile, "нейтральное", health_mem)
     system_prompt = """Ты — ассистент по здоровому образу жизни.
 ПРАВИЛА: 1. Только ЗОЖ: режим, питание, гидратация, отдых, активность, гигиена, стресс-менеджмент. 2. НИКОГДА не называй препараты/БАДы/дозы. 3. При боли/температуре — рекомендуй врача. 4. Кратко, по делу, поддерживающе. 5. Дисклеймер: "Рекомендации не заменяют консультацию специалиста." Настроение учитывай, фокус на пользе."""
     ctx = "\n".join([f"{m['role']}: {m['content']}" for m in health_mem[-4:]])
@@ -665,6 +588,68 @@ async def call_health_ai(user_text: str, profile: dict, health_mem: list):
     except:
         return "🩺 Я не могу дать медицинский совет. Рекомендую обратиться к врачу."
 
+# ======================
+#  🔥 AI: РЕЖИМ ПСИХОАНАЛИЗА (АДАПТИВНЫЙ ТОН)
+# ======================
+def detect_psycho_style(text: str, mood: str) -> tuple[str, float]:
+    """Определяет стиль ответа и температуру для психоанализа"""
+    t = text.lower()
+    # 🔥 Жёсткий тон: когда нужно "встряхнуть"
+    if any(k in t for k in ["пинка", "встряхни", "достал себя жалеть", "хватит ныть", "что делать", "застрял", "не могу решиться", "дай совет", "как быть"]):
+        return "tough", 0.4
+    # 😏 Сарказм/ирония: когда пользователь в ресурсе
+    if mood == "радость" or any(k in t for k in ["посмеяться", "ирония", "сарказм", "по-доброму", "подколи", "шутк"]):
+        return "sarcastic", 0.95
+    # 🤍 Эмпатия: грусть, тревога, усталость
+    if mood in ["грусть", "тревога", "усталость"]:
+        return "empathetic", 0.6
+    # 🧠 Аналитика: нейтральный запрос
+    return "analytical", 0.75
+
+async def call_psycho_ai(user_text: str, profile: dict, psycho_mem: list, mood: str):
+    """Адаптивный психоанализ: эмпатия, аналитика, жёсткий тон или сарказм"""
+    if not OPENROUTER_API_KEY:
+        return await call_qwen_fallback(user_text, profile, mood, psycho_mem)
+    
+    style, temperature = detect_psycho_style(user_text, mood)
+    
+    style_prompts = {
+        "empathetic": f"""Ты — эмпатичный психоаналитик. Твоя задача — выслушать, отразить чувства, помочь пользователю разобраться в себе.
+ПРАВИЛА: 1. Начинай с отражения эмоций ("Я слышу, что ты чувствуешь..."). 2. Задавай мягкие уточняющие вопросы. 3. Не давай готовых решений — помогай найти свои. 4. Будь тёплым, человечным, без клише. 5. Дисклеймер в конце сеанса: "Я не заменяю профессионального психолога." Настроение: {mood}""",
+        
+        "analytical": f"""Ты — аналитичный психоаналитик. Твоя задача — помочь пользователю структурировать мысли и увидеть ситуацию под разными углами.
+ПРАВИЛА: 1. Разложи ситуацию на факты/чувства/возможности. 2. Задавай логичные уточняющие вопросы. 3. Предлагай варианты, но не навязывай. 4. Будь объективным, но поддерживающим. 5. Дисклеймер: "Я не заменяю профессионального психолога." Настроение: {mood}""",
+        
+        "tough": f"""Ты — прямой психоаналитик "жёсткой любви". Твоя задача — помочь пользователю выйти из застоя, взяв ответственность.
+ПРАВИЛА: 1. Говори чётко, без воды. 2. Задавай прямые вопросы о действиях СЕГОДНЯ. 3. Не позволяй уходить в самокопание без вывода. 4. Поддерживай, но требуй конкретики. 5. Дисклеймер: "Я не заменяю профессионального психолога." Настроение: {mood}""",
+        
+        "sarcastic": f"""Ты — психоаналитик с лёгкой иронией. Твоя задача — помочь пользователю увидеть ситуацию с юмором и снять напряжение.
+ПРАВИЛА: 1. Используй добрый сарказм, не обижая. 2. Помогай увидеть абсурдность застоя через юмор. 3. После иронии — мягкий переход к действиям. 4. Следи, чтобы пользователь был в ресурсе для такого тона. 5. Дисклеймер: "Я не заменяю профессионального психолога." Настроение: {mood}"""
+    }
+    
+    system_prompt = style_prompts.get(style, style_prompts["analytical"])
+    ctx = "\n".join([f"{m['role']}: {m['content']}" for m in psycho_mem[-6:]])
+    
+    try:
+        async with httpx.AsyncClient(timeout=20) as cl:
+            r = await cl.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": "openai/gpt-4o-mini",
+                    "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": f"{ctx}\n\n{user_text}" if ctx else user_text}],
+                    "temperature": temperature,
+                    "max_tokens": 1500
+                }
+            )
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"].strip()
+    except:
+        return "🧠 Я здесь, чтобы выслушать. Расскажи, что у тебя на душе?"
+
+# ======================
+#  🔥 FALLBACKS
+# ======================
 def get_fallback_response(user_text: str, mood: str) -> str:
     if mood == "грусть": return "Понимаю. Расскажи, что случилось? 🤍"
     if mood == "тревога": return "Всё будет хорошо. Что беспокоит?"
@@ -690,12 +675,10 @@ async def save_memory(uid, role, content):
     async with db_pool.acquire() as conn:
         await conn.execute("INSERT INTO memory(user_id,role,content) VALUES ($1,$2,$3)", uid, role, content)
         await conn.execute("DELETE FROM memory WHERE user_id=$1 AND id NOT IN (SELECT id FROM memory WHERE user_id=$1 ORDER BY created_at DESC LIMIT 20)", uid)
-
 async def get_memory(uid):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT role,content FROM memory WHERE user_id=$1 ORDER BY created_at DESC LIMIT 6", uid)
         return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
-
 async def update_emotion(uid, text):
     mood = "нейтральное"
     if any(w in text for w in ["груст","печаль","тоск","плохо"]): mood = "грусть"
@@ -703,15 +686,12 @@ async def update_emotion(uid, text):
     elif any(w in text for w in ["устал","выгор","нет сил"]): mood = "усталость"
     elif any(w in text for w in ["тревож","беспоко","нерв"]): mood = "тревога"
     async with db_pool.acquire() as conn: await conn.execute("INSERT INTO emotions(user_id,mood) VALUES ($1,$2)", uid, mood)
-
 async def get_mood(uid):
     async with db_pool.acquire() as conn:
         row = await conn.fetchval("SELECT mood FROM emotions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1", uid)
         return row or "нейтральное"
-
 async def update_last_activity(uid):
     async with db_pool.acquire() as conn: await conn.execute("INSERT INTO last_activity(user_id,last_time) VALUES ($1,NOW()) ON CONFLICT(user_id) DO UPDATE SET last_time=NOW()", uid)
-
 def extract_profile(text):
     text = text.lower(); name=age=gender=city=None
     m = re.search(r"меня зовут (\w+)", text)
@@ -723,7 +703,6 @@ def extract_profile(text):
     m = re.search(r"город[ :]+([\w\s\-]+?)(?:\?|$)", text)
     if m: city = m.group(1).strip()
     return name, age, gender, city
-
 def parse_time(text):
     text = text.lower(); now = now_moscow()
     if "вечером" in text: dt = now.replace(hour=19,minute=0); return dt if dt>now else dt+timedelta(days=1)
@@ -740,8 +719,8 @@ def parse_time(text):
 RU_COMMANDS = {
     "меню":"show_menu", "задачи":"list_tasks", "заметк":"notes_list", "календар":"calendar_list",
     "привычк":"habits_list", "погод":"ext_weather", "курс":"ext_currency", "здоровье":"ext_health",
-    "кино":"ext_cinema", "новост":"ext_news", "профиль":"profile_show", "помощь":"help_show",
-    "дашборд":"dashboard_show", "сброс":"reset_context", "reset":"reset_context", "забудь":"reset_context",
+    "психо":"ext_psycho", "кино":"ext_cinema", "новост":"ext_news", "профиль":"profile_show", "мой профиль":"profile_show",
+    "помощь":"help_show", "дашборд":"dashboard_show", "сброс":"reset_context", "reset":"reset_context", "забудь":"reset_context",
     "очисти память":"reset_context", "новая тема":"reset_context"
 }
 def parse_ru_command(text:str) -> str|None:
@@ -776,8 +755,8 @@ async def cmd_help(msg:Message):
 🔁 /habit — привычки
 🔄 /reset — сбросить контекст
 ⏰ "напомни [что] [когда]"
-🌤 /weather, 💱 /currency, 🩺 /health, 🎬 /cinema, 📰 /news
-👤 /profile
+🌤 /weather, 💱 /currency, 🩺 /health, 🧠 /psycho, 🎬 /cinema, 📰 /news
+👤 /profile — мой профиль
 Или нажми кнопку 👇""", parse_mode="Markdown", reply_markup=main_menu_keyboard())
 
 @dp.message(Command("profile"))
@@ -805,7 +784,6 @@ async def cmd_news(msg:Message):
 
 # ======================
 #  🔥 ДАШБОРД / ПРОФИЛЬ / ЗАМЕТКИ / КАЛЕНДАРЬ / ЗАДАЧИ
-# (Хендлеры без изменений — сокращено)
 # ======================
 @dp.message(Command("dashboard"))
 async def cmd_dashboard(msg:Message):
@@ -875,7 +853,6 @@ async def note_category_cb(call:CallbackQuery, state:FSMContext):
 
 @dp.message(NoteFSM.content, F.text=="/skip")
 async def note_skip(msg:Message, state:FSMContext): await state.clear(); await msg.answer("❌ Отменено")
-
 @dp.message(NoteFSM.content)
 async def note_content(msg:Message, state:FSMContext):
     data = await state.get_data()
@@ -883,14 +860,12 @@ async def note_content(msg:Message, state:FSMContext):
     await state.update_data(content=content)
     await state.set_state(NoteFSM.tags)
     await msg.answer("🏷 Теги (через запятую, /skip — пропустить):")
-
 @dp.message(NoteFSM.tags, F.text=="/skip")
 async def note_tags_skip(msg:Message, state:FSMContext):
     data = await state.get_data()
     note_id = await create_note(msg.from_user.id, data["content"], None, data.get("category","general"))
     await msg.answer(f"✅ #{note_id}", reply_markup=note_actions_keyboard(note_id))
     await state.clear()
-
 @dp.message(NoteFSM.tags)
 async def note_tags(msg:Message, state:FSMContext):
     tags = [t.strip() for t in msg.text.split(",") if t.strip()]
@@ -898,7 +873,6 @@ async def note_tags(msg:Message, state:FSMContext):
     note_id = await create_note(msg.from_user.id, data["content"], tags, data.get("category","general"))
     await msg.answer(f"✅ #{note_id}", reply_markup=note_actions_keyboard(note_id))
     await state.clear()
-
 @dp.message(Command("notes"))
 async def cmd_notes(msg:Message):
     notes = await get_notes(msg.from_user.id)
@@ -910,25 +884,21 @@ async def cmd_notes(msg:Message):
 async def cmd_event_start(msg:Message, state:FSMContext):
     await state.set_state(CalendarFSM.title)
     await msg.answer("📅 Название:")
-
 @dp.message(CalendarFSM.title)
 async def event_title(msg:Message, state:FSMContext):
     await state.update_data(title=msg.text)
     await state.set_state(CalendarFSM.description)
     await msg.answer("📄 Описание (/skip):")
-
 @dp.message(CalendarFSM.description, F.text=="/skip")
 async def event_desc_skip(msg:Message, state:FSMContext):
     await state.update_data(description=None)
     await state.set_state(CalendarFSM.event_date)
     await msg.answer("🗓 Когда? ('завтра в 18:00'):")
-
 @dp.message(CalendarFSM.description)
 async def event_description(msg:Message, state:FSMContext):
     await state.update_data(description=msg.text)
     await state.set_state(CalendarFSM.event_date)
     await msg.answer("🗓 Когда? ('завтра в 18:00'):")
-
 @dp.message(CalendarFSM.event_date)
 async def event_date(msg:Message, state:FSMContext):
     event_date = parse_time(msg.text)
@@ -936,7 +906,6 @@ async def event_date(msg:Message, state:FSMContext):
     await state.update_data(event_date=event_date)
     await state.set_state(CalendarFSM.recurrence)
     await msg.answer("🔄 Повтор:", reply_markup=task_recurrence_keyboard())
-
 @dp.callback_query(F.data.startswith("rec_"))
 async def event_recurrence_cb(call:CallbackQuery, state:FSMContext):
     recurrence = call.data.split("_")[1] if call.data != "rec_none" else None
@@ -946,7 +915,6 @@ async def event_recurrence_cb(call:CallbackQuery, state:FSMContext):
     await call.message.answer(f"✅ #{event_id}: {data['title']}\n🗓 {data['event_date'].astimezone(MOSCOW_TZ).strftime('%d.%m %H:%M')}")
     await state.clear()
     await call.answer()
-
 @dp.message(Command("calendar"))
 async def cmd_calendar(msg:Message):
     events = await get_calendar_events(msg.from_user.id)
@@ -958,25 +926,21 @@ async def cmd_calendar(msg:Message):
 async def cmd_task_start(msg:Message, state:FSMContext):
     await state.set_state(TaskFSM.title)
     await msg.answer("📝 Название:")
-
 @dp.message(TaskFSM.title)
 async def task_title(msg:Message, state:FSMContext):
     await state.update_data(title=msg.text)
     await state.set_state(TaskFSM.description)
     await msg.answer("📄 Описание (/skip):")
-
 @dp.message(TaskFSM.description, F.text=="/skip")
 async def task_skip_desc(msg:Message, state:FSMContext):
     await state.update_data(description=None)
     await state.set_state(TaskFSM.priority)
     await msg.answer("⚡ Приоритет:", reply_markup=task_priority_keyboard())
-
 @dp.message(TaskFSM.description)
 async def task_description(msg:Message, state:FSMContext):
     await state.update_data(description=msg.text)
     await state.set_state(TaskFSM.priority)
     await msg.answer("⚡ Приоритет:", reply_markup=task_priority_keyboard())
-
 @dp.callback_query(F.data.startswith("pri_"))
 async def task_priority_cb(call:CallbackQuery, state:FSMContext):
     priority = call.data.split("_")[1]
@@ -984,57 +948,47 @@ async def task_priority_cb(call:CallbackQuery, state:FSMContext):
     await call.message.edit_text(f"✅ {priority}")
     await state.set_state(TaskFSM.due_date)
     await call.message.answer("📅 Срок (/skip):")
-
 @dp.message(TaskFSM.due_date, F.text=="/skip")
 async def task_skip_due(msg:Message, state:FSMContext):
     await state.update_data(due_date=None)
     await state.set_state(TaskFSM.category)
     await msg.answer("📂 Категория:", reply_markup=task_category_keyboard())
-
 @dp.message(TaskFSM.due_date)
 async def task_due_date(msg:Message, state:FSMContext):
     await state.update_data(due_date=parse_time(msg.text))
     await state.set_state(TaskFSM.category)
     await msg.answer("📂 Категория:", reply_markup=task_category_keyboard())
-
 @dp.callback_query(F.data.startswith("cat_"))
 async def task_category_cb(call:CallbackQuery, state:FSMContext):
     await state.update_data(category=call.data.split("_")[1])
     await call.message.edit_text("✅ Категория")
     await state.set_state(TaskFSM.tags)
     await call.message.answer("🏷 Теги (/skip):")
-
 @dp.message(TaskFSM.tags, F.text=="/skip")
 async def task_skip_tags(msg:Message, state:FSMContext):
     await state.update_data(tags=None)
     await state.set_state(TaskFSM.recurrence)
     await msg.answer("🔄 Повтор:", reply_markup=task_recurrence_keyboard())
-
 @dp.message(TaskFSM.tags)
 async def task_tags(msg:Message, state:FSMContext):
     await state.update_data(tags=[t.strip() for t in msg.text.split(",") if t.strip()])
     await state.set_state(TaskFSM.recurrence)
     await msg.answer("🔄 Повтор:", reply_markup=task_recurrence_keyboard())
-
 @dp.callback_query(F.data.startswith("rec_"))
 async def task_recurrence_cb(call:CallbackQuery, state:FSMContext):
     await state.update_data(recurrence=call.data.split("_")[1] if call.data != "rec_none" else None)
     await state.set_state(TaskFSM.attachments)
     await call.message.answer("📎 Вложения (/skip):")
     await call.answer()
-
 @dp.message(TaskFSM.attachments, F.text=="/skip")
 async def task_skip_attachments(msg:Message, state:FSMContext): await _finish_task_creation(msg, state, None)
-
 @dp.message(TaskFSM.attachments)
 async def task_attachments(msg:Message, state:FSMContext): await _finish_task_creation(msg, state, [a.strip() for a in msg.text.split(",") if a.strip()])
-
 async def _finish_task_creation(msg:Message, state:FSMContext, attachments):
     data = await state.get_data()
     task_id = await create_task(uid=msg.from_user.id, title=data["title"], description=data.get("description"), priority=data.get("priority","medium"), due_date=data.get("due_date"), category=data.get("category","general"), tags=data.get("tags"), parent_id=None, recurrence=data.get("recurrence"), attachments=attachments)
     await msg.answer(f"✅ #{task_id}: {data['title']}", reply_markup=task_actions_keyboard(task_id))
     await state.clear()
-
 @dp.message(Command("tasks"))
 async def cmd_tasks(msg:Message):
     tasks = await get_tasks(msg.from_user.id)
@@ -1049,49 +1003,39 @@ async def cmd_tasks(msg:Message):
 async def cb_tasks(call:CallbackQuery):
     tasks = await get_tasks(call.from_user.id)
     await call.message.edit_text("📋 Задачи:\n" + "\n".join([f"• {t['title']}" for t in tasks[:5]]) if tasks else "Нет задач", reply_markup=main_menu_keyboard())
-
 @dp.callback_query(F.data.startswith("task_complete_"))
 async def cb_task_done(call:CallbackQuery):
     await complete_task(call.from_user.id, int(call.data.split("_")[-1]))
     await call.answer("✅"); await call.message.delete()
-
 @dp.callback_query(F.data.startswith("task_delete_"))
 async def cb_task_del(call:CallbackQuery):
     await delete_task(call.from_user.id, int(call.data.split("_")[-1]))
     await call.answer("🗑"); await call.message.delete()
-
 @dp.callback_query(F.data.startswith("task_subtasks_"))
 async def cb_task_subtasks(call:CallbackQuery):
     subtasks = await get_subtasks(call.from_user.id, int(call.data.split("_")[-1]))
     await call.message.answer("📋 Подзадачи:\n" + "\n".join([f"• {st['title']}" for st in subtasks]) if subtasks else "Нет подзадач")
-
 @dp.callback_query(F.data=="notes_list")
 async def cb_notes(call:CallbackQuery):
     notes = await get_notes(call.from_user.id)
     await call.message.edit_text("📝 Заметки:\n" + "\n".join([f"#{n['id']} {n['content'][:40]}..." for n in notes[:5]]) if notes else "Нет заметок", reply_markup=main_menu_keyboard())
-
 @dp.callback_query(F.data=="calendar_list")
 async def cb_calendar(call:CallbackQuery):
     events = await get_calendar_events(call.from_user.id)
     await call.message.edit_text("📅 События:\n" + "\n".join([f"• {e['title']}" for e in events[:5]]) if events else "Нет событий", reply_markup=main_menu_keyboard())
-
 @dp.callback_query(F.data=="habits_list")
 async def cb_habits(call:CallbackQuery):
     habits = await get_habits(call.from_user.id)
     await call.message.edit_text("🔁 Привычки:\n" + "\n".join([f"• {h['name']}: {h['streak']} дн." for h in habits]) if habits else "Нет привычек", reply_markup=main_menu_keyboard())
-
 @dp.callback_query(F.data=="reminders_list")
 async def cb_reminders(call:CallbackQuery):
     await call.message.answer("⏰ Напиши: 'напомни [что] [когда]'"); await call.answer()
-
 @dp.callback_query(F.data=="profile_show")
 async def cb_profile(call:CallbackQuery):
     p = await get_profile(call.from_user.id)
     await call.answer(f"👤 {p['name'] or '—'} • {p['city'] or CITY_DEFAULT}", show_alert=True)
-
 @dp.callback_query(F.data=="help_show")
 async def cb_help(call:CallbackQuery): await call.answer("/help — список команд", show_alert=True)
-
 @dp.callback_query(F.data.startswith("note_delete_"))
 async def cb_note_del(call:CallbackQuery):
     await delete_note(call.from_user.id, int(call.data.split("_")[-1]))
@@ -1115,6 +1059,16 @@ async def cb_ext_health(call:CallbackQuery):
     await call.message.answer("🩺 **Режим здоровья активирован**\n\nЯ помогу с рекомендациями по ЗОЖ, сну, питанию и отдыху.\n⚠️ Я не врач и не назначаю препараты. Опиши, что беспокоит или что хочешь улучшить?")
     await call.answer()
 
+@dp.callback_query(F.data=="ext_psycho")
+async def cb_ext_psycho(call:CallbackQuery):
+    await set_user_mode(call.from_user.id, "psycho", "", "[]")
+    await call.message.answer(
+        "🧠 **Режим психоанализа активирован**\n\n"
+        "Расскажи, что у тебя на душе? Я здесь, чтобы выслушать и помочь разобраться. 🤍\n"
+        "⚠️ Я не заменяю профессионального психолога. При острых состояниях обращайся к специалисту."
+    )
+    await call.answer()
+
 @dp.callback_query(F.data=="ext_cinema")
 async def cb_ext_cinema(call:CallbackQuery):
     profile = await get_profile(call.from_user.id)
@@ -1134,7 +1088,7 @@ async def cb_ext_news(call:CallbackQuery):
     await call.answer()
 
 # ======================
-#  🔥 🔥  ОСНОВНОЙ ЧАТ (v4.5-final) 🔥 🔥 
+#  🔥 🔥  ОСНОВНОЙ ЧАТ (v4.6) 🔥 🔥 
 # ======================
 @dp.message()
 async def chat(msg:Message, state:FSMContext):
@@ -1164,10 +1118,11 @@ async def chat(msg:Message, state:FSMContext):
     
     current_mode = profile.get("mode", "general")
     
-    # Если в режиме здоровья → проверяем выход
+    # 🔥 РЕЖИМ ЗДОРОВЬЯ
     if current_mode == "health":
-        if any(k in text_lower for k in HEALTH_EXIT_TRIGGERS) or should_reset_context(text):
+        if any(k in text_lower for k in HEALTH_EXIT_TRIGGERS) or should_reset_context(text) or is_topic_change(text, "health"):
             await set_user_mode(uid, "general")
+            await save_health_context(uid, [])
             await msg.answer("✅ Режим здоровья завершён. Чем ещё могу помочь?")
             return
         h_ctx = await get_health_context(uid)
@@ -1178,8 +1133,24 @@ async def chat(msg:Message, state:FSMContext):
         await save_health_context(uid, h_ctx)
         await msg.answer(answer)
         return
+    
+    # 🔥 РЕЖИМ ПСИХОАНАЛИЗА
+    if current_mode == "psycho":
+        if any(k in text_lower for k in PSYCHO_EXIT_TRIGGERS) or should_reset_context(text) or is_topic_change(text, "psycho"):
+            await set_user_mode(uid, "general")
+            await save_psycho_context(uid, [])
+            await msg.answer("✅ Сеанс завершён. Я всегда на связи. 🤍")
+            return
+        p_ctx = await get_psycho_context(uid)
+        p_ctx.append({"role": "user", "content": text})
+        await save_psycho_context(uid, p_ctx)
+        answer = await call_psycho_ai(text, profile, p_ctx, await get_mood(uid))
+        p_ctx.append({"role": "assistant", "content": answer})
+        await save_psycho_context(uid, p_ctx)
+        await msg.answer(answer)
+        return
 
-    # Общий режим
+    # 🔥 ОБЩИЙ РЕЖИМ
     if should_reset_context(text) or any(kw in text_lower for kw in FRUSTRATION_KEYWORDS):
         await clear_user_context(uid)
     
@@ -1214,6 +1185,10 @@ async def chat(msg:Message, state:FSMContext):
         elif cmd == "ext_health":
             await set_user_mode(uid, "health", "[]")
             await msg.answer("🩺 **Режим здоровья активирован**\n\nЯ помогу с рекомендациями по ЗОЖ, сну, питанию и отдыху.\n⚠️ Я не врач и не назначаю препараты. Опиши, что беспокоит или что хочешь улучшить?")
+            return
+        elif cmd == "ext_psycho":
+            await set_user_mode(uid, "psycho", "", "[]")
+            await msg.answer("🧠 **Режим психоанализа активирован**\n\nРасскажи, что у тебя на душе? Я здесь, чтобы выслушать и помочь разобраться. 🤍\n⚠️ Я не заменяю профессионального психолога. При острых состояниях обращайся к специалисту.")
             return
         elif cmd == "ext_cinema":
             city = profile.get("city") if profile and profile.get("city") else CITY_DEFAULT
@@ -1265,13 +1240,11 @@ async def morning_quote():
     for u in users:
         try: await bot.send_message(u["user_id"], f"☀️ **Доброе утро!**\n\n{await get_next_quote_for_user(u['user_id'])}")
         except: pass
-
 async def afternoon_fact():
     async with db_pool.acquire() as conn: users = await conn.fetch("SELECT user_id FROM users")
     for u in users:
         try: await bot.send_message(u["user_id"], f"🧠 **Факт дня**:\n\n{await get_next_fact_for_user(u['user_id'])}")
         except: pass
-
 async def morning_ping():
     async with db_pool.acquire() as conn: users = await conn.fetch("SELECT user_id FROM users")
     for u in users:
@@ -1280,7 +1253,6 @@ async def morning_ping():
             data = await get_dashboard_data(u["user_id"], profile)
             await bot.send_message(u["user_id"], f"☀️ **План на день**\n\n" + format_dashboard(data), parse_mode="Markdown")
         except: pass
-
 async def evening_report():
     async with db_pool.acquire() as conn: users = await conn.fetch("SELECT user_id FROM users")
     for u in users:
@@ -1289,7 +1261,6 @@ async def evening_report():
             pend = await conn.fetchval("SELECT COUNT(*) FROM tasks WHERE user_id=$1 AND status='pending' AND due_date::date = CURRENT_DATE", u["user_id"])
             await bot.send_message(u["user_id"], f"🌙 **Итоги дня**\n✅ Выполнено: {comp}\n⏳ На завтра: {pend}\n\nОтличная работа! 💪")
         except: pass
-
 async def habit_check():
     async with db_pool.acquire() as conn: habits = await conn.fetch("SELECT id,user_id,name,last_done,frequency FROM habits")
     now = now_moscow().date()
@@ -1297,13 +1268,11 @@ async def habit_check():
         if h["frequency"]=="daily" and h["last_done"] and h["last_done"] < now - timedelta(days=1):
             try: await bot.send_message(h["user_id"], f"🔁 '{h['name']}' — не забудь сегодня!")
             except: pass
-
 async def task_reminder_check():
     async with db_pool.acquire() as conn: tasks = await conn.fetch("SELECT user_id,title,due_date FROM tasks WHERE status='pending' AND due_date IS NOT NULL AND due_date <= NOW() + INTERVAL '1 hour' AND due_date > NOW()")
     for t in tasks:
         try: await bot.send_message(t["user_id"], f"⏰ Скоро: {t['title']} ({t['due_date'].astimezone(MOSCOW_TZ).strftime('%H:%M')})")
         except: pass
-
 async def calendar_reminder_check():
     async with db_pool.acquire() as conn: events = await conn.fetch("SELECT user_id, title, event_date FROM calendar_events WHERE event_date <= NOW() + INTERVAL '1 hour' AND event_date > NOW() - INTERVAL '1 hour'")
     for e in events:
@@ -1313,8 +1282,7 @@ async def calendar_reminder_check():
 # ======================
 #  🔥 HEALTH CHECK / ЗАПУСК
 # ======================
-async def health_handler(request): return web.json_response({"status":"ok","bot":"AssistEmpat v4.5-final"}, headers={"Content-Type":"application/json"})
-
+async def health_handler(request): return web.json_response({"status":"ok","bot":"AssistEmpat v4.6"}, headers={"Content-Type":"application/json"})
 async def start_health_server():
     app = web.Application()
     app.router.add_get('/health', health_handler)
@@ -1327,7 +1295,7 @@ async def start_health_server():
     return runner
 
 async def main():
-    logging.info(f"🚀 Starting AssistEmpat v4.5-final (port={HEALTH_PORT}, TZ=Moscow)")
+    logging.info(f"🚀 Starting AssistEmpat v4.6 (port={HEALTH_PORT}, TZ=Moscow)")
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
     def handle_signal(): logging.info("🛑 Signal received"); stop_event.set()
@@ -1349,7 +1317,7 @@ async def main():
     logging.info("✅ Scheduler started (Moscow TZ)")
     await bot.delete_webhook(drop_pending_updates=True)
     if stop_event.is_set(): await cleanup(health_runner); return
-    logging.info("✅ AssistEmpat v4.5-final ready — STARTING POLLING")
+    logging.info("✅ AssistEmpat v4.6 ready — STARTING POLLING")
     polling_task = asyncio.create_task(dp.start_polling(bot))
     done, pending = await asyncio.wait([polling_task, asyncio.create_task(stop_event.wait())], return_when=asyncio.FIRST_COMPLETED)
     await cleanup(health_runner)
