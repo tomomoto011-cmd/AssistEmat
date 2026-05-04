@@ -1176,16 +1176,40 @@ async def get_optimal_reminder_time(uid: int, activity_type: str) -> str | None:
 # ======================
 #  INLINE КЛАВИАТУРЫ
 # ======================
-def main_menu_keyboard(family_mode: bool = False):
-    family_btn = InlineKeyboardButton(text="👨‍‍👧‍👦 Семья", callback_data="family_view") if family_mode else InlineKeyboardButton(text="👤 Профиль", callback_data="profile_show")
+# --- Вставь это вместо старой main_menu_keyboard ---
+
+def more_menu_keyboard(profile_ctx):
+    """Меню для второстепенных функций"""
+    is_in_family = bool(profile_ctx.get("family_id")) # Проверка, есть ли семья
+    
+    family_btn = InlineKeyboardButton(text="👨‍👩‍👧‍👦 Управление семьей", callback_data="family_panel") if is_in_family else InlineKeyboardButton(text="👨‍👩‍‍👦 Создать семью", callback_data="family_create_start")
+    
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Задачи", callback_data="tasks_list"), InlineKeyboardButton(text="📝 Заметки", callback_data="notes_list")],
-        [InlineKeyboardButton(text="🌳 Дерево", callback_data="notes_tree"), InlineKeyboardButton(text="📅 Календарь", callback_data="calendar_list")],
-        [InlineKeyboardButton(text="🔁 Привычки", callback_data="habits_list"), InlineKeyboardButton(text="📊 Дашборд", callback_data="dashboard_show")],
-        [InlineKeyboardButton(text="🌤 Погода", callback_data="ext_weather"), InlineKeyboardButton(text="🧠 Психоанализ", callback_data="ext_psycho")],
-        [InlineKeyboardButton(text="🎬 Афиша", callback_data="ext_cinema"), InlineKeyboardButton(text="📰 Новости", callback_data="ext_news")],
-        [family_btn, InlineKeyboardButton(text="❓ Помощь", callback_data="help_show")],
+        [InlineKeyboardButton(text="📰 Новости", callback_data="ext_news"), InlineKeyboardButton(text="🎬 Кино", callback_data="ext_cinema")],
+        [family_btn],
+        [InlineKeyboardButton(text="↩️ Назад", callback_data="menu_back")]
     ])
+
+def main_menu_keyboard(profile_ctx):
+    """Динамическое главное меню"""
+    mode = profile_ctx.get("mode", "general")
+    
+    # Если в режиме здоровья или психо, показываем кнопку выхода
+    exit_mode_btn = None
+    if mode in ["health", "psycho"]:
+        exit_mode_btn = InlineKeyboardButton(text="🔙 Выйти из режима", callback_data="exit_special_mode")
+
+    rows = [
+        [InlineKeyboardButton(text="📋 Задачи", callback_data="tasks_list"), InlineKeyboardButton(text="📝 Заметки", callback_data="notes_list")],
+        [InlineKeyboardButton(text="🔁 Привычки", callback_data="habits_list"), InlineKeyboardButton(text="📅 Календарь", callback_data="calendar_list")],
+        [InlineKeyboardButton(text="📊 Дашборд", callback_data="dashboard_show"), InlineKeyboardButton(text="🔔 Напомнить", callback_data="reminders_list")],
+        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile_show"), InlineKeyboardButton(text="📂 Ещё...", callback_data="menu_more")]
+    ]
+    
+    if exit_mode_btn:
+        rows.append([exit_mode_btn])
+        
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def family_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -1621,7 +1645,41 @@ async def cmd_news(msg:Message):
         await msg.answer(text, reply_markup=external_link_keyboard(get_news_link(), "Все новости"))
     else:
         await msg.answer("📰 Новости:", reply_markup=external_link_keyboard(get_news_link(), "Яндекс.Новости"))
+# --- Добавь новый класс FSM ---
+class ResetFSM(StatesGroup):
+    waiting_confirmation = State()
 
+# --- Добавь эти хендлеры (замени старый @dp.message(Command("reset"))) ---
+
+@dp.message(Command("reset", "clear"))
+async def cmd_reset_request(msg: Message, state: FSMContext):
+    """Запрос подтверждения сброса"""
+    await state.set_state(ResetFSM.waiting_confirmation)
+    await msg.answer(
+        "⚠️ **Внимание!**\n\n"
+        "Это действие полностью удалит историю диалога и контекст бота. "
+        "Вы уверены, что хотите продолжить?\n\n"
+        "Напишите `Да` для подтверждения или `Нет` для отмены.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Да, очистить", callback_data="reset_confirm_yes")]])
+    )
+
+@dp.callback_query(F.data == "reset_confirm_yes")
+async def cb_reset_confirm_yes(call: CallbackQuery, state: FSMContext):
+    """Подтверждение сброса"""
+    await clear_user_context(call.from_user.id)
+    await call.message.edit_text("✅ Контекст успешно очищен. Начинаем с чистого листа!")
+    await state.clear()
+    await call.answer()
+
+@dp.message(ResetFSM.waiting_confirmation)
+async def cmd_reset_text_confirm(msg: Message, state: FSMContext):
+    """Подтверждение сброса текстом"""
+    if msg.text.lower() in ["да", "yes", "+"]:
+        await clear_user_context(msg.from_user.id)
+        await msg.answer("✅ Контекст успешно очищен.")
+    else:
+        await msg.answer("❌ Отмена. Ничего не удалено.")
+    await state.clear()
 # ======================
 #  🔥 СЕМЕЙНЫЙ РЕЖИМ
 # ======================
@@ -2296,6 +2354,61 @@ async def cb_ext_news(call:CallbackQuery):
 # ======================
 #  🔥 🔥  ОСНОВНОЙ ЧАТ (v4.9) 🔥 🔥
 # ======================
+# --- Обнови функцию chat ---
+
+@dp.message()
+async def chat(msg: Message, state: FSMContext):
+    # Если пользователь в FSM (например, ждет подтверждения reset), не прерываем
+    current_state = await state.get_state()
+    if current_state:
+        return 
+
+    uid = msg.from_user.id
+    text = msg.text
+    text_lower = text.lower()
+    
+    # --- 1. ПРОВЕРКА ЕСТЕСТВЕННОГО ЯЗЫКА (NLP) ---
+    # Если текст похож на команду создания задачи/заметки, перехватываем
+    
+    # Паттерны для задач: "создай задачу...", "запиши задачу...", "задача: ..."
+    if re.search(r'(создай|добавь|запиши)\s+(задач|задачк|задание)', text_lower) or re.match(r'задач.*:', text_lower):
+        # Извлекаем суть задачи (грубо, для демо)
+        task_title = re.sub(r'(создай|добавь|запиши)\s+(задач|задачк|задание)[\s:]*', '', text_lower).strip()
+        if not task_title: task_title = text # Если не поняли, берем весь текст
+        
+        # Создаем задачу сразу и спрашиваем про календарь
+        task_id = await create_task(uid, title=task_title)
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📅 Добавить в календарь", callback_data=f"add_task_to_cal_{task_id}")],
+            [InlineKeyboardButton(text="✅ Готово", callback_data="task_done_no_cal")]
+        ])
+        await msg.answer(f"✅ Задача создана: **{task_title}**\nХотите добавить напоминание в календарь?", parse_mode="Markdown", reply_markup=keyboard)
+        return
+
+    # Паттерны для заметок: "запиши заметку...", "заметка: ..."
+    if re.search(r'(запиши|создай)\s+заметк', text_lower) or re.match(r'заметк.*:', text_lower):
+        note_content = re.sub(r'(запиши|создай)\s+заметк[\s:]*', '', text_lower).strip()
+        if not note_content: note_content = text
+        
+        note_id = await create_note(uid, content=note_content)
+        await msg.answer(f"📝 Заметка сохранена: **{note_content}**", parse_mode="Markdown")
+        return
+
+    # --- 2. ОБЫЧНАЯ ЛОГИКА (Grok + AI) ---
+    profile_ctx = await get_user_profile_context(uid)
+    
+    # Проверка на системные команды через парсер
+    cmd = parse_ru_command(text)
+    if cmd:
+        # ... тут твоя логика обработки команд (/profile, /weather и т.д.) ...
+        # Если команда распознана, выполняем и return
+        pass 
+
+    # Если ничего не распознано как команда или NLP-триггер -> идем в AI
+    # Здесь вызывается Grok/OpenAI
+    # answer = await call_grok_analysis(...)
+    # await msg.answer(answer)
 @dp.message()
 async def chat(msg:Message, state:FSMContext):
     if not msg.text or await state.get_state():
