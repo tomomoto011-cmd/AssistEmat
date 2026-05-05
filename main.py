@@ -686,18 +686,7 @@ async def get_notes(uid, limit=10, search=None, category=None, parent_id=None, r
                 note["children"] = children
         return notes
 
-async def get_note_tree(uid, root_id=None):
-    async with db_pool.acquire() as conn:
-        if root_id:
-            root = await conn.fetchrow("SELECT id, content, tags, category, parent_id, created_at FROM notes WHERE id=$1 AND user_id=$2", root_id, uid)
-            if not root: return None
-            children = await conn.fetch("SELECT id, content, tags, category, parent_id, created_at FROM notes WHERE user_id=$1 AND parent_id=$2 ORDER BY created_at", uid, root_id)
-            root["children"] = children
-            return root
-        else:
-            roots = await conn.fetch("SELECT id, content, tags, category, parent_id, created_at FROM notes WHERE user_id=$1 AND parent_id IS NULL ORDER BY created_at DESC LIMIT 20", uid)
-            for root in roots: root["children"] = await conn.fetch("SELECT id, content, tags, category, parent_id, created_at FROM notes WHERE user_id=$1 AND parent_id=$2 ORDER BY created_at", uid, root["id"])
-            return roots
+
 
 async def delete_note(uid, note_id):
     async with db_pool.acquire() as conn: await conn.execute("DELETE FROM notes WHERE id=$1 AND user_id=$2", note_id, uid)
