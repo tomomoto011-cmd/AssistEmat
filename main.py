@@ -136,7 +136,14 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
 db_pool = None
+# ======================
+#  🔑 АДМИНИСТРАТОР
+# ======================
+ADMIN_USER_ID = 1425899739  # Твой Telegram ID
 
+def is_admin(user_id: int) -> bool:
+    """Проверяет, является ли пользователь админом"""
+    return user_id == ADMIN_USER_ID
 # ======================
 #  🔥 УМНОЕ ИСПРАВЛЕНИЕ РАСКЛАДКИ
 # ======================
@@ -1141,7 +1148,40 @@ async def cmd_help(msg:Message):
 🌤 /weather, 💱 /currency, 🩺 /health, 🧠 /psycho, 🎬 /cinema, 📰 /news
 👤 /profile — мой профиль
 Или нажми кнопку 👇""", parse_mode="Markdown", reply_markup=main_menu_keyboard(False))
+@dp.message(Command("admin"))
+async def cmd_admin(msg: Message):
+    """Полный список команд и функций для администратора"""
+    if not is_admin(msg.from_user.id):
+        await msg.answer("🚫 Доступ запрещён. Эта команда доступна только создателю бота.")
+        return
+    
+    admin_menu = """👑 **Панель Администратора**
+*ID:* `{}` | *Роль:* Owner
 
+📜 **Доступные команды:**
+`/start` ` /help` ` /profile` ` /profile edit`
+`/task` ` /tasks` ` /note` ` /notes` ` /note_tree`
+`/event` ` /calendar` ` /habit` ` /habit_stats`
+`/dashboard` ` /weather` ` /currency` ` /cinema` ` /news`
+`/family` ` /join <код>` ` /reset` ` /switch`
+
+⚙️ **Активные модули:**
+🧠 **AI-режимы:** Здоровье, Психоанализ (адаптивный тон по возрасту/полу)
+👨‍👩‍👧‍👦 **Семейный режим:** создание групп, инвайт-коды, общие задачи/события
+📊 **Дашборд:** сводка дня, трекинг привычек, инсайты продуктивности
+🔍 **NLP-парсер:** создание задач/заметок обычным текстом (без слешей)
+🛡 **Безопасность:** изоляция данных, подтверждение `/reset`, FSM-защита
+
+🛠 **Управление ботом:**
+• Все настройки хранятся в `.env` (Railway Variables)
+• База данных: Neon PostgreSQL (автоподключение)
+• Логи: доступны в панели Railway → Logs
+• Перезапуск: `git push` или кнопка Restart в Railway
+
+💡 *Для системных действий (ключи, лимиты, логи) используй панель Railway.*
+""".format(msg.from_user.id)
+    
+    await msg.answer(admin_menu, parse_mode="Markdown")
 @dp.message(Command("profile"))
 async def cmd_profile(msg:Message, state:FSMContext):
     p = await get_profile(msg.from_user.id)
