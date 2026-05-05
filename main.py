@@ -2033,7 +2033,7 @@ async def task_reminder_check():
         try: await bot.send_message(t["user_id"], f"⏰ Скоро: {t['title']} ({t['due_date'].astimezone(MOSCOW_TZ).strftime('%H:%M')})")
         except: pass
 
-  async def calendar_reminder_check():
+async def calendar_reminder_check():
     async with db_pool.acquire() as conn:
         events = await conn.fetch("SELECT user_id, title, event_date FROM calendar_events WHERE event_date <= NOW() + INTERVAL '1 hour' AND event_date > NOW() - INTERVAL '1 hour'")
     for e in events:
@@ -2112,7 +2112,7 @@ async def cleanup(health_runner=None):
     if scheduler.running:
         try: scheduler.shutdown(wait=False)
         except: pass
-    if db_pool:dlfjkzgnjkn
+    if db_pool:
         try: await db_pool.close()
         except: pass
     if bot.session:
